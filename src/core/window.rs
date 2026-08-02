@@ -50,6 +50,74 @@ struct AnimState {
     last_switch: Instant,
 }
 
+/// 尝试加载一个系统已安装的中文字体，注册为 egui 字体fallback链的最后一环，
+/// 解决 egui 默认字体不含CJK字形、导致中文文本显示为方块(tofu)的问题。
+///
+/// 背景（本轮深度优化复盘时确认的真实缺口，不是猜测）：egui/eframe 目前
+/// 没有"侦测到缺字后自动去系统找字体"的能力——这是egui仓库里一个至今
+/// 还开着的功能请求(issue #5233 "Automatically load system fonts when
+/// needed")，官方原话是"用户想显示一个中文字符，但当前没有任何字体支持它"
+/// 这种情况需要应用自己处理。不做这件事的直接后果：任何包含中文的
+/// 代码注释、markdown正文都会在预览时显示成方块，而这个工具很可能就是
+/// 拿来预览中文内容的文件，所以这不是边缘情况，是核心场景。
+///
+/// 做法：读取一个系统已经装好的中文字体文件，追加(push，而非insert(0))
+/// 到 Proportional 和 Monospace 两个字体族的fallback列表末尾——用push
+/// 而不是插到最前面，是因为 epaint 对每个字符是按family列表顺序逐个尝试
+/// 找含有对应字形的字体，插到最前面会让这个字体连带接管拉丁字符的渲染
+/// （拉丁字符的字形观感通常不如egui精心选择的默认字体），追加到末尾
+/// 才是纯粹的"默认字体不认识的字符才交给它"这种fallback语义。
+///
+/// 为什么直接读系统字体文件而不是打包一份进二进制：中文字体（覆盖
+/// 常用汉字，不算生僻字全集）体积普遍在几MB到十几MB，打包进去会明显
+/// 拖累"极致轻量"这个目标；而运行环境本来就是Windows，系统上几乎必然
+/// 已经装好了中文字体（哪怕系统语言是英文，只要曾经启用过东亚语言支持，
+/// 这些字体文件就在），零额外体积成本，只是运行时多占一点内存
+/// （只加载遇到的第一个候选，成功即停，不会把多个候选都读进内存）。
+///
+/// 尚待你验证的假设：这里的候选路径覆盖了从 Windows 7 到现在最常见的
+/// 简体中文字体。如果你的实际目标机器是"从未启用过东亚语言支持的
+/// 纯英文Windows精简安装"，这两个候选都可能不存在——如果这是你需要
+/// 覆盖的场景，请告诉我，到时候要么改成运行时提示、要么退回"打包一份
+/// 字体进二进制"这条更重但更保险的路径。
+fn load_cjk_fallback_font(ctx: &egui::Context) {
+    const CANDIDATE_PATHS: &[&str] = &[
+        r"C:\Windows\Fonts\msyh.ttc",   // 微软雅黑：Win7+简体中文系统的常见默认
+        r"C:\Windows\Fonts\simsun.ttc", // 宋体：更老但存在时间更长、覆盖面更广
+    ];
+
+    for path in CANDIDATE_PATHS {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert(
+                    "cjk_fallback".to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+                );
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Proportional)
+                    .or_default()
+                    .push("cjk_fallback".to_owned());
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Monospace)
+                    .or_default()
+                    .push("cjk_fallback".to_owned());
+                ctx.set_fonts(fonts);
+                return; // 找到一个可用的就够了，不需要把后面的候选也读进内存
+            }
+            Err(_) => continue, // 这个路径在当前系统上不存在，试下一个候选
+        }
+    }
+
+    eprintln!(
+        "警告：未找到系统中文字体（尝试过 msyh.ttc / simsun.ttc），\
+         中文字符可能显示为方块。这不影响程序其余功能，\
+         但如果你的文件内容包含中文，建议确认系统是否安装了中文字体支持。"
+    );
+}
+
 pub struct QuickLookApp {
     request_gen: RequestGenerator,
     pdf_provider: PdfProvider,
@@ -63,7 +131,13 @@ pub struct QuickLookApp {
 }
 
 impl QuickLookApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // 本轮深度优化新增：加载系统CJK字体作为后备，解决中文显示为方块
+        // 的问题（egui 默认字体不含CJK字形，且egui本身没有自动侦测缺字后
+        // 去系统找字体的能力——这是上游一个尚未实现的开放issue）。
+        // 具体原理和取舍见下方 load_cjk_fallback_font 函数的文档注释。
+        load_cjk_fallback_font(&cc.egui_ctx);
+
         // 换成 mupdf 后不再有"引擎初始化可能因缺少动态库而失败"的问题——
         // MuPDF 通过 mupdf-sys 在编译期静态链接进了二进制，构造 PdfProvider
         // 本身不会失败，不需要再像 PDFium 方案那样处理 Option/降级路径。
