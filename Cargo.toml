@@ -13,14 +13,37 @@ path = "src/main.rs"
 
 [dependencies]
 # ---- GUI ----
-# 注意：egui/eframe/egui_extras/egui_commonmark 这四个必须版本互相匹配
-# （下游 crate 对 egui 的版本要求是精确的，不是宽松兼容），
-# 写这份代码时 egui_commonmark 最新版对应 egui 0.34，
-# 所以这里全部对齐到 0.34。你在自己机器上 `cargo update` 前，
-# 建议先确认这四个包的版本仍然互相匹配，避免编译期报版本冲突。
-eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+# 注意：egui/eframe/egui_commonmark 必须版本互相匹配（下游 crate 对 egui
+# 的版本要求是精确的，不是宽松兼容），写这份代码时 egui_commonmark 最新版
+# 对应 egui 0.34，所以这里对齐到 0.34。你在自己机器上 `cargo update` 前，
+# 建议先确认这几个包的版本仍然互相匹配，避免编译期报版本冲突。
+#
+# feature选择说明（本轮深度优化的复盘结果）：
+# - 只留 "glow"，不启用 "wgpu"：eframe 当前版本的默认feature集合实际上
+#   已经把 "wgpu" 列进默认值了（这点容易被忽略，因为多数教程示例代码
+#   不会强调这点）。wgpu 会带入 wgpu-core/wgpu-hal 整个跨API抽象层
+#   （同时支持DX12/Vulkan/Metal等多个后端），对我们这种"贴几张位图上屏"
+#   的场景是明显过剩的重型依赖。glow(OpenGL)后端更轻量、更直接，
+#   完全够用，所以这里用 default-features = false 主动关掉默认值，
+#   只挑 glow 回来。
+# - 去掉了之前版本里的 "wayland"/"x11"：这两个是 winit 的 Linux 窗口后端，
+#   官方文档写明"仅在 Unix 平台生效"，编译到 Windows 目标时这两个feature
+#   不会拉入任何实际代码（winit 内部按目标系统条件编译，Windows下
+#   Wayland/X11相关依赖根本不会被选中链接）。技术上留着不影响体积，
+#   但既然目标平台明确是 Windows，留着纯粹是无意义的干扰项，直接删掉
+#   让 Cargo.toml 如实反映"这是个Windows单文件程序"这件事。
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow"] }
 egui = "0.34"
-egui_extras = { version = "0.34", features = ["image"] }
+# 注意：之前版本这里还有 egui_extras（features = ["image"]），本轮复盘发现
+# 整个项目从未真正用到它——window.rs 里的图片/PDF页面展示全程走的是
+# "自己解码成RGBA -> ctx.load_texture() -> ui.image(texture_handle, size)"
+# 这条 base egui 自带的路径（ImageSource::Texture 是 egui 核心本身的能力，
+# 文档见 docs.rs/egui 的 ImageSource 页面），不需要 egui_extras 提供的
+# "从字节/URI自动解码"那层便利封装。更关键的是：egui_extras 的 "image"
+# feature 内部依赖的正是通用 `image` crate 做解码——也就是说，留着这个
+# 没用到的依赖，会把我们刚刚从jpg/png路径里换掉的 `image` crate**原样
+# 拉回来**，完全抵消了那一轮优化的效果。已确认整个 src/ 目录没有任何
+# `egui_extras` 的引用，直接删除。
 
 # ---- 图片 InMemory 路径 (jpg/png/gif) ----
 # jpg/png 换成 zune-jpeg/zune-png：SIMD加速、依赖树更小，比 image crate
@@ -44,7 +67,37 @@ infer = "0.16"
 # 整个项目需以AGPL-3.0开源），详细说明见 providers/pdf.rs 顶部注释。
 # mupdf-sys 在构建时从源码编译MuPDF并静态链接进最终二进制，
 # 不需要像PDFium方案那样额外分发一个独立的动态库文件。
-mupdf = "0.6"
+#
+# feature精简说明（本轮深度优化的核心发现）：mupdf crate 的默认feature
+# 集合是 [js, xps, svg, cbz, img, html, epub, system-fonts, tesseract,
+# brotli, docx-output, base14-fonts]——这远超"打开PDF、渲染成图片"这一个
+# 需求。默认集合里包含了：PDF表单的JavaScript脚本引擎、XPS文档格式、
+# CBZ漫画压缩包格式、HTML/EPUB文档渲染（这两个还会连带需要brotli解压
+# 缩web字体）、Tesseract OCR文字识别引擎、DOCX导出能力——这些我们
+# 一个都用不上，却会被静态编译进最终二进制里。mupdf-sys 的 build.rs
+# 证实这些feature关闭时对应的C编译宏（FZ_ENABLE_XPS=0等）会被设置，
+# 也就是说这不只是"不多拉一个crate"，而是MuPDF这个C库本身会被编译掉
+# 对应的整段代码，是实打实的体积削减。
+#
+# 保留的两个feature：
+# - base14-fonts：PDF规范内建的14种标准字体（Times/Helvetica/Courier等），
+#   绝大多数真实PDF假设这些字体总是可用而不内嵌它们，去掉这个会导致
+#   相当一部分常见PDF显示不出正确字体，这个必须留。
+# - system-fonts：允许MuPDF在PDF没有内嵌字体、也不是base14标准字体时
+#   （常见于中文PDF引用系统安装的"微软雅黑"/"宋体"等字体但不内嵌），
+#   向操作系统查询已安装字体做兜底渲染。这个是特意保留的——去掉会导致
+#   不少中文PDF出现缺字/方块字，这里的取舍逻辑和下面 core/window.rs 里
+#   CJK字体回退的考虑是同一件事：与其打包一份沉重的CJK字体进二进制，
+#   不如让程序在运行时借用系统已经装好的字体，零体积成本换正确渲染。
+#
+# 未完全验证的边界情况（请在你自己机器上用真实PDF测试确认）：
+# 关掉 "img" feature 理论上只影响"把一个独立图片文件当成文档打开"这种
+# MuPDF的文档类型封装，不影响PDF页面内容流里内嵌的图片正常渲染
+# （那是PDF核心渲染管线的一部分，由更底层的jpeg/jbig2/openjpeg解码库
+# 处理，不受这个feature开关影响）——但这个结论是基于对feature语义的
+# 阅读推断，不是我在这里实际编译验证过的，建议你找一份内嵌了图片的
+# PDF（比如扫描件或者带照片的PDF）测试一下确认没有回归。
+mupdf = { version = "0.8", default-features = false, features = ["base14-fonts", "system-fonts"] }
 
 # ---- 文本查看器：编码探测 ----
 chardetng = "0.1"
@@ -74,7 +127,10 @@ syntastica-themes = "0.6"
 egui_commonmark = "0.23"
 
 # ---- 杂项 ----
-anyhow = "1"
+# 注意：之前版本这里还有 anyhow = "1"，本轮复盘确认整个 src/ 没有任何代码
+# 引用 anyhow（所有错误类型都是 thiserror 定义的具体枚举，函数签名统一用
+# `Result<T, 具体错误类型>`，从未用过 anyhow::Result 或 anyhow! 宏），
+# 纯属声明了但没用上的依赖，直接删除。
 thiserror = "1"
 
 [profile.release]
