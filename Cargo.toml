@@ -1,35 +1,85 @@
 [package]
-name        = "hush"
-version     = "1.0.0-gamma"
-edition     = "2021"
-description = "Hush — silent, instant macOS cleaner"
-license     = "BlueOak-1.0.0"
+name = "quicklook_rs"
+version = "0.1.0"
+edition = "2021"
+# 注意：现代 egui/epaint 系列要求 rustc 1.76+。
+# 本项目在你自己的开发机上编译，请确保工具链是当前 stable
+# （建议用 rustup 装最新 stable，不要用发行版仓库自带的旧版 rustc/cargo）。
+rust-version = "1.76"
 
 [[bin]]
-name = "hush"
+name = "quicklook_rs"
 path = "src/main.rs"
 
-[profile.release]
-opt-level     = "z"
-lto           = true
-codegen-units = 1
-strip         = true
-panic         = "abort"
-
 [dependencies]
-clap       = { version = "4.6.1", default-features = false,
-               features = ["derive","color","help","usage","error-context"] }
-serde      = { version = "1.0.228", default-features = false, features = ["derive"] }
-serde_json = { version = "1.0.140", default-features = false, features = ["std"] }
-libc       = { version = "0.2.172", default-features = false }
-log        = { version = "0.4.29", features = ["max_level_info","release_max_level_warn"] }
-env_logger = { version = "0.11.10", default-features = false, features = ["humantime"] }
-anyhow     = { version = "1.0.102", default-features = false }
+# ---- GUI ----
+# 注意：egui/eframe/egui_extras/egui_commonmark 这四个必须版本互相匹配
+# （下游 crate 对 egui 的版本要求是精确的，不是宽松兼容），
+# 写这份代码时 egui_commonmark 最新版对应 egui 0.34，
+# 所以这里全部对齐到 0.34。你在自己机器上 `cargo update` 前，
+# 建议先确认这四个包的版本仍然互相匹配，避免编译期报版本冲突。
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.34"
+egui_extras = { version = "0.34", features = ["image"] }
 
-[dev-dependencies]
-# Integration tests: spawn the compiled binary and check output/exit codes
-assert_cmd = "2"
-# Unit tests: create temporary files and directories
-tempfile   = "3"
-# libc needed in test builds for set_mtime_old (utimes syscall)
-libc       = "0.2"
+# ---- 图片 InMemory 路径 (jpg/png/gif) ----
+# jpg/png 换成 zune-jpeg/zune-png：SIMD加速、依赖树更小，比 image crate
+# 通用解码路径更快更瘦，是"极致轻量、刚好覆盖需要的格式"这个目标下
+# 更贴切的选择（详见 providers/image.rs 顶部注释里的选型说明）。
+# gif 仍用 image crate（禁用其余格式解码器，只留 gif 这一个），理由是
+# zune生态目前没有成熟的动图支持，image crate 的 AnimationDecoder
+# 已经很完善，没必要为了"整体统一用一个库"牺牲这块的成熟度。
+# webp/avif 不在这里，走 onas_bridge（本次不实现）。
+zune-core = "0.5"
+zune-jpeg = "0.5"
+zune-png = "0.5"
+image = { version = "0.25", default-features = false, features = ["gif"] }
+
+# ---- 文件类型探测 ----
+infer = "0.16"
+
+# ---- PDF ----
+# mupdf: AGPL-3.0 授权（或Artifex商业授权，二选一）。
+# 你已明确知晓并接受这个许可证含义（分发本程序若不购买商业授权，
+# 整个项目需以AGPL-3.0开源），详细说明见 providers/pdf.rs 顶部注释。
+# mupdf-sys 在构建时从源码编译MuPDF并静态链接进最终二进制，
+# 不需要像PDFium方案那样额外分发一个独立的动态库文件。
+mupdf = "0.6"
+
+# ---- 文本查看器：编码探测 ----
+chardetng = "0.1"
+encoding_rs = "0.8"
+
+# ---- 文本查看器：tree-sitter 高亮（syntastica） ----
+# 用 syntastica-parsers（而非 -git/-gitdep）：纯 crates.io 依赖，
+# 编译不需要联网拉取 git 仓库，符合"单文件、构建可复现"的目标；
+# 代价是语言覆盖面比 -git collection 少，但 "some" 档已覆盖常见开发语言。
+syntastica = "0.6"
+syntastica-parsers = { version = "0.6", features = ["some"] }
+syntastica-themes = "0.6"
+
+# ---- Markdown ----
+# 不启用 `better_syntax_highlighting` feature：那个选项内部用的是 syntect，
+# 会在"主代码查看器已经改用tree-sitter/syntastica"之外，为了 markdown
+# 内嵌代码块这个次要场景，重新引入你明确要求弃用的引擎。
+# 代价：markdown 文件里的围栏代码块不再有语法高亮，只显示等宽字体纯文本。
+# 这是"轻量优先、非必需功能不加"这个原则下的直接取舍——
+# 预览本地 markdown 文件的核心诉求是"看清楚内容"，代码块着色是加分项，
+# 不是刚需，换来的是不必引入一整套 syntect 依赖。
+# 注意：这里没有加 default-features = false——egui_commonmark 的默认
+# feature集合具体包含哪些项目在几个版本间有过调整，为避免"顺手关掉的
+# default feature里其实包含核心解析功能"这种翻车，稳妥做法是保留默认值，
+# 只是不主动打开 better_syntax_highlighting（它在所有版本的文档示例里
+# 都是作为附加可选项出现，不加它不会影响基本渲染能力）。
+egui_commonmark = "0.23"
+
+# ---- 杂项 ----
+anyhow = "1"
+thiserror = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
