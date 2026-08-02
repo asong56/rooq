@@ -1,365 +1,128 @@
-# Hush
+# quicklook_rs — 本次交付说明
 
-> Silent. Instant. macOS cleaner.
+本次交付范围：**不需要 onas 的四个模块**——图片(jpg/png/gif，InMemory 路径)、
+PDF(仅前6页，纯内存缓存)、文本/代码查看器(tree-sitter/syntastica 高亮)、
+Markdown(egui_commonmark)。
 
-One binary. Zero noise. Runs on login, cleans everything, never asks twice.
+webp/avif（图片）与 mkv/webm（视频）需要 onas，本次不实现；
+dispatcher 探测到这几类文件时会显示"暂不支持"的占位提示，不会崩溃。
 
-```
-hush clean       # full clean in one shot
-hush crush       # kill all rogue background processes
-hush snapshot    # delete stale APFS snapshots
-hush optimize    # apply all system tweaks
-hush status      # show daemon state, config path, log size
-hush install     # register daemon — runs forever, silently
-```
+## 在你自己机器上编译前必读
 
----
+**这份代码没有在编写它的沙盒环境里跑通完整编译**，原因是那个环境只能装到
+rustc 1.75（2023年底版本），而 egui/egui_commonmark 现在的版本要求 1.76+
+（egui_commonmark 0.23 甚至要求 egui 0.34）。这不影响代码本身的正确性，
+但意味着你需要在自己的机器上做第一次真正的 `cargo build` 验证——
+沙盒里只做到了：
+- 全部依赖关系在 crates.io 上确认真实存在、版本号互相匹配（不是编造的版本号）；
+- 逐个 API 用法（`Processor::process`、`resolve_styles`、`CommonMarkViewer::new().show()`、
+  `mupdf` 的 `Document::open`/`load_page`/`to_pixmap`/`Pixmap::samples` 等）都对照了
+  当前 crates.io/docs.rs 上的真实文档，不是凭训练记忆编造的接口；
+- 人工审查了每个文件的括号配对、明显的借用冲突、以及一处已发现并修正的
+  反模式写法（`PlainText` 渲染原本用 `TextEdit::multiline(&mut content.clone())`
+  每帧克隆全文，已改成只读 `Label`）。
 
-## Goals
+**请在开始使用前跑一次 `cargo check`**，把编译器实际报出的错误反馈给我，
+比继续凭空猜测更有效率。
 
-| Metric | Target |
-|--------|--------|
-| Daemon RSS (idle) | **< 128 KB** |
-| Binary size (release) | **< 1.5 MB** |
-| Cold start to first pass | **< 100 ms** |
-| External runtime dependencies | **none** |
-| Configuration hot-reload latency | **< 100 ms** |
-
----
-
-## Install
+### 环境准备
 
 ```bash
-# Build (requires Rust stable, macOS 12+)
+# 1. 确保 rustc 是当前 stable，且不低于 1.76（建议直接装最新版）
+rustup update stable
+rustc --version   # 确认版本号
+
+# 2. 编译
+cd quicklook_rs
 cargo build --release
-
-# Put on PATH
-sudo cp target/release/hush /usr/local/bin/hush
-
-# Install LaunchAgent (auto-start on login)
-hush install
-
-# First run
-hush clean
 ```
 
-### Uninstall
+### PDF 功能：mupdf（AGPL-3.0），无需额外部署动态库
 
-```bash
-hush uninstall
-sudo rm /usr/local/bin/hush
-rm -rf ~/Library/Application\ Support/hush
-```
+PDF 引擎用的是 **mupdf-rs**（对应 MuPDF），不是 PDFium。这是对上一版交付的
+更正——上一版用了 PDFium，但那不是你要的东西，是我自作主张套用旧方案文档
+加上去的，你从未批准过。
 
----
+**许可证提醒（务必确认这依然是你要的）**：MuPDF 是 AGPL-3.0（或购买
+Artifex 商业授权二选一）。你已经明确表示接受 AGPL，但这里再强调一次：
+如果你分发这个程序却不购买商业授权，意味着整个项目都需要以 AGPL-3.0
+对外开源。这和 PDFium 的宽松许可证是完全不同的法律状况，请在实际对外
+分发前再确认一次这个选择依然成立。
 
-## Commands
+部署上比 PDFium 方案简单：`mupdf-sys` 在 `cargo build` 时会从源码编译
+MuPDF 并静态链接进最终二进制，**不需要**你另外下载、放置、分发一个
+独立的动态库文件（不像 PDFium 需要单独的 `pdfium.dll`）。代价是：
 
-### `hush clean` — full clean
+- 编译机器需要 C/C++ 工具链 + libclang（供 bindgen 用）。
+  Windows 上建议装 MSVC Build Tools + LLVM（提供 `libclang.dll`），
+  具体步骤请查阅 `mupdf-sys` 仓库 README 里的平台相关说明。
+- 首次编译会比纯 Rust 依赖慢不少（要编译 MuPDF 的 C 源码），
+  这是一次性成本，之后的增量编译不受影响。
 
-```
-FLAGS
-  -n, --dry-run    Show what would be removed, change nothing
-  --system         .DS_Store, AppleDouble, crash logs, tmp, system logs
-  --cache          Developer caches (Xcode, npm, cargo, brew, pip, …)
-  --projects       Project build artifacts (node_modules, target/, .build, …)
-  --apps           App cache sweep (unused > 7d threshold)
-  --snapshots      Delete stale APFS local snapshots
-  --uninstall      Uninstall apps unused > 1 year (requires --apps)
-  -a, --all        All passes (default)
-```
-
-#### What `hush clean` touches
-
-**System junk**
-| Target | Description |
-|--------|-------------|
-| `.DS_Store` | Finder metadata — recursively across home + /Volumes |
-| `._*` (AppleDouble) | HFS+ resource fork remnants |
-| `*.crash`, `*.spin`, `*.hang`, `*.ips` | Crash/diagnostic reports older than `log_max_age_days` |
-| `/private/var/db/DiagnosticPipeline` | System diagnostic pipeline DB |
-| `/private/var/db/powerlog` | Battery/power audit logs |
-| `/private/tmp` | Temp files older than `tmp_max_age_hours` |
-| System log files | `/private/var/log/**/*.log` older than threshold |
-
-**Developer caches** (50+ entries, risk-rated)
-| Risk | Meaning |
-|------|---------|
-| 🟢 safe | Rebuilt automatically by the tool |
-| 🟡 caution | May require a large re-download |
-| 🔴 risky | Contains irreplaceable data — **skipped by default** |
-
-Risky entries (Docker volumes, Ollama models, etc.) are listed in `audit` but never auto-deleted.
-
-**Project artifacts** — scans `~/Developer`, `~/Documents`, `~/Projects`, etc. for:
-`node_modules`, `target/`, `.build/`, `build/`, `vendor/`, `.dart_tool/`, `.terraform/`, and more — only if ≥ 10 MB.
-
----
-
-### `hush snapshot` — APFS snapshot management
-
-Parses `tmutil listlocalsnapshots /`, then:
-
-- Keeps the **N newest** snapshots (`thresholds.snapshot_keep_count`)
-- Deletes everything older than `thresholds.snapshot_max_age_days`
-- Skips deletion if Time Machine is currently backing up
-- Also removes stale `.inProgress` backup bundles (after `incomplete_safe_hours`)
-
-```bash
-hush snapshot --list    # audit only
-hush snapshot           # delete stale
-hush snapshot -n        # dry-run
-```
-
----
-
-### `hush crush` — rogue process killer
-
-```bash
-hush crush              # kill everything in rogue_list.process_names
-hush crush "AppName"    # kill a specific process by name
-```
-
-Kill sequence per target:
-1. `pkill -x <name>` — SIGTERM (graceful, waits `graceful_timeout_secs`)
-2. `pkill -9 -x <name>` — SIGKILL (force)
-3. `launchctl bootout gui/<uid>/<pid>` — evict from launchd (prevents respawn)
-4. `pgrep -x <name>` — verify dead
-
-Also removes **broken LaunchAgents** — plists whose backing binary no longer exists on disk.
-
----
-
-### `hush silence` — notification & background control
-
-```bash
-hush silence                    # all rules
-hush silence --notifications    # restrict NC to banners-only
-hush silence --background       # disable non-essential LaunchAgents
-hush silence --dock             # force apps to quit on window close
-```
-
-**Notification restriction** writes to `com.apple.notificationcenterui.<bundleId>`:
-- Rogue list apps → `alert-style = none` (fully silent)
-- All others → `alert-style = banner`, badge off, sound off
-
-**Force-quit-on-close** sets `NSQuitAlwaysKeepsWindows = false` globally and per-app. Apps no longer linger in the Dock or menu bar after their last window closes.
-
----
-
-### `hush optimize` — system tuning
-
-```bash
-hush optimize              # all passes
-hush optimize --network    # flush DNS + ARP
-hush optimize --system     # LaunchServices, SQLite, quarantine DB, saved state…
-hush optimize --ui         # Dock speed, QuickLook, Finder, font cache
-```
-
-**System passes**
-
-| Pass | What it does |
-|------|-------------|
-| `launch_services_rebuild` | `lsregister -kill -r` — fixes "Open With" duplicates |
-| `sqlite_vacuum` | `VACUUM` all `.db` files in ~/Library (< 500 MB, not in use) |
-| `quarantine_cleanup` | Prunes `LSQuarantineEvent` rows older than threshold |
-| `saved_state_cleanup` | Removes stale `.savedState` bundles (app gone or > 30d) |
-| `broken_launch_agents` | Unloads + removes LaunchAgent plists with missing binaries |
-| `notification_center_cleanup` | Prunes NC pref domains for uninstalled apps |
-| `coreduet_cleanup` | Clears CoreDuet knowledge DB (Siri Suggestions data) |
-| `periodic_maintenance` | Runs BSD `periodic daily/weekly/monthly` scripts |
-
-**UI passes**
-
-| Pass | What it does |
-|------|-------------|
-| `quicklook_refresh` | Kills `qlmanage`, clears thumbnail cache |
-| `font_cache_rebuild` | Removes `com.apple.ATS` cache + restarts ATSServer |
-| `prevent_network_dsstore` | `DSDontWriteNetworkStores` + `DSDontWriteUSBStores` |
-| `dock_refresh` | Zero autohide delay, scale minimize, no recent apps |
-
----
-
-### `hush audit` — read-only report
-
-```bash
-hush audit
-```
-
-Prints:
-1. All apps sorted by days-since-last-use + size
-2. All local APFS snapshots + age
-3. (No changes are made)
-
----
-
-### `hush install` / `hush uninstall` — daemon lifecycle
-
-```bash
-hush install      # writes ~/Library/LaunchAgents/com.hush.daemon.plist
-hush uninstall    # unloads + removes
-```
-
-Daemon runs with `Nice = 5` and `LowPriorityIO = true` — it never competes with foreground work. Logs to `~/Library/Logs/hush.log`.
-
----
-
-## `config.json`
-
-Default location: `~/Library/Application Support/hush/config.json`
-
-Custom: `hush --config /path/to/config.json <command>`
-
-### Hot-reload
-
-Edit and save `config.json`. The daemon picks it up **within 100 ms** via macOS `kqueue EVFILT_VNODE NOTE_WRITE`. No restart needed. Atomic editor saves (temp→rename) are also handled (`NOTE_RENAME`).
-
-### Key fields
-
-```jsonc
-{
-  "thresholds": {
-    "cache_unused_days": 7,          // app cache sweep threshold
-    "uninstall_unused_days": 365,    // stale app uninstall threshold
-    "snapshot_max_age_days": 7,      // APFS snapshot max age
-    "snapshot_keep_count": 2         // always keep N newest snapshots
-  },
-
-  "snapshots": {
-    "auto_delete": true,
-    "skip_if_tm_running": true,      // safe: never interfere with active backup
-    "delete_incomplete_backups": true
-  },
-
-  "silence": {
-    "force_quit_on_window_close": true,  // no menu-bar/Dock lingering
-    "per_app_overrides": {
-      "com.apple.Mail": { "allow_notifications": true, "allow_background": true }
-    }
-  },
-
-  "whitelist": {
-    "bundle_ids": [ "com.apple.finder", ... ],
-    "apps":       [ "Finder", "Dock", ... ]
-  },
-
-  "rogue_list": {
-    "bundle_ids":    [ "com.mackeeper.MacKeeper", ... ],
-    "process_names": [ "MacKeeper Helper", ... ]
-  }
-}
-```
-
----
-
-## Safety guarantees
-
-### 1. Signature & notarisation protection
-- **Never** deletes files inside a live `.app/Contents/` tree
-- Calls `codesign --verify` before any uninstall operation
-- If the bundle is mid-update (codesign fails), the uninstall is skipped
-
-### 2. File-lock / process occupancy
-- Directories > 512 MB are checked via `lsof +D` before deletion
-- Process stem-name check (`pgrep -f`) for every app cache being cleared
-- Kill sequence uses SIGTERM → sleep → SIGKILL → `launchctl bootout` (prevents respawn)
-
-### 3. Permission escalation prevention
-- Never writes to TCC database directly
-- All writes stay in `~/Library` (user-space)
-- Paths requiring FDA (`/Library/Mail`, `/Library/Messages`, etc.) are in `guard.rs` blocklist
-- No `sudo` prompts — operations that need root are skipped with a log message
-
-### 4. Critical cache protection
-`guard.rs` maintains a hard-blocked segment list including:
-```
-com.apple.systempreferences   com.apple.controlcenter
-com.apple.coreaudio           com.apple.security.*
-com.apple.trustd              com.apple.bird  (iCloud)
-org.cups.*                    com.apple.dock.saved-state
-```
-Any path containing these segments is unconditionally skipped, regardless of config.
-
----
-
-## Architecture
+## 目录结构
 
 ```
 src/
-├── main.rs                  CLI entry, subcommand dispatch
-├── cli.rs                   clap argument definitions
-├── config.rs                Typed config structs + kqueue hot-reload
-├── guard.rs                 Safety: hard-blocks, lsof, codesign, TCC, critical bundles
-├── daemon.rs                Background event loop + LaunchAgent install
-│
-├── cleaner/
-│   ├── ops.rs               safe_remove(), walk_delete_if(), measure_size()
-│   ├── system.rs            DS_Store, AppleDouble, crash logs, tmp, system logs
-│   ├── cache.rs             Dev caches (50+ entries) + project artifact sweep
-│   ├── apps.rs              mdls last-used, rogue removal, stale uninstall
-│   └── snapshots.rs         APFS snapshot audit + deletion + incomplete backups
-│
-├── optimizer/
-│   ├── network.rs           DNS flush, ARP/routing reset
-│   ├── system.rs            LaunchServices, SQLite vacuum, quarantine DB,
-│   │                        saved state, broken agents, NC cleanup, CoreDuet, periodic
-│   └── ui.rs                QuickLook, font cache, Dock tuning, Finder tweaks
-│
-└── sentinel/
-    ├── notifications.rs     NC restriction via defaults write (no TCC touch)
-    ├── processes.rs         Rogue process crusher + broken agent killer
-    └── silence.rs           LaunchAgent disabling + force-quit-on-close
+├── main.rs                    # 程序入口，支持命令行传入文件路径
+├── core/
+│   ├── mod.rs
+│   ├── dispatcher.rs           # 文件类型探测与分流（含单元测试）
+│   ├── request_gen.rs          # 请求代次管理，为后续onas异步接入预留（含单元测试）
+│   └── window.rs               # eframe主App，串联四个provider的UI渲染
+└── providers/
+    ├── mod.rs
+    ├── image.rs                 # jpg/png走zune-jpeg/zune-png，gif走image crate（含单元测试）
+    ├── pdf.rs                   # PDF前6页渲染+内存LRU缓存，引擎为mupdf（含单元测试）
+    └── text/
+        ├── mod.rs               # 编码探测(BOM/chardetng) + 大文件视口策略框架（含单元测试）
+        ├── highlight.rs         # tree-sitter/syntastica高亮 -> egui LayoutJob（含单元测试）
+        └── markdown.rs          # egui_commonmark集成（不启用syntect相关feature）
 ```
 
-### Memory budget
+## 已知的取舍和尚待你确认的点
 
-| Component | Budget |
-|-----------|--------|
-| Daemon main stack | 8 KB |
-| Config watcher thread stack | 64 KB (explicit) |
-| Parsed Config struct (heap) | ~4 KB |
-| Serde / log buffers (transient) | ~16 KB |
-| Total idle RSS | **< 100 KB** |
+1. **PDF 引擎是 mupdf，AGPL-3.0 许可证**：你已明确接受这个许可证含义，
+   这里再提醒一次因为它比技术选型重要——分发本程序若不购买 Artifex
+   商业授权，整个项目需要以 AGPL-3.0 对外开源。这是和上一版（误用
+   PDFium）完全不同的法律状况，请在正式对外分发前再次确认。
 
-Achieved via: no tokio, no arc-swap, no allocator-heavy crates, `panic = "abort"`, `opt-level = "z"`, `strip = true`.
+2. **PDF 缓存不落盘**：按你的要求做成纯内存 `HashMap` 缓存，进程退出即清空，
+   不写任何 AppData/Roaming/自定义缓存目录。代价是重启程序后同一份PDF
+   需要重新渲染一次，这是"纯单文件、零磁盘footprint"这个约束下的
+   直接后果，已经在 `providers/pdf.rs` 顶部注释里写明。
 
----
+3. **图片解码引擎换成 zune-jpeg/zune-png（jpg/png），gif 仍用 image crate**：
+   这是针对"是否有更轻量、性能更好、只覆盖需要的功能"这个问题的复盘结果——
+   `image` crate 的 jpg/png 解码路径不是当前最优解，zune 系列 SIMD 加速、
+   依赖树更小。gif 因为 zune 生态目前没有成熟的动图支持，保留用
+   `image` crate（这是"各用各的强项"而非"整体套用一个通用库"）。
+   PNG 解码这里额外做了 Luma/LumaA/RGB/RGBA 四种色彩空间到统一RGBA8的
+   手动展开（而非依赖库内的 `png_set_add_alpha_channel` 选项——那个选项
+   对 Luma 输入只会转出 LumaA，不会转出 RGBA，不满足"统一按RGBA8上屏"
+   的需要），16位深度PNG当前明确报错而非静默降级精度，如果你的实际
+   使用场景有较多16位PNG，需要回来补上到8位的正确缩放逻辑。
 
-## Requires root (sudo)
+4. **Markdown 不再启用 `better_syntax_highlighting`**：
+   之前的版本为了给 markdown 里的围栏代码块上色，加了这个会引入 syntect
+   的 feature——这和你"主代码查看器要用 tree-sitter、不要 syntect"的
+   要求是矛盾的，即使只是次要场景也不该引入。现在去掉了，代价是
+   markdown 文件里的代码块不再有语法高亮，只显示等宽字体纯文本。
+   如果你后续觉得这块高亮体验值得要，需要走"自己拦截围栏代码块、
+   调用 highlight.rs 处理"这条路，是一块独立的额外工作量。
 
-These operations are skipped silently when not root:
+5. **大文件"只渲染可见视口"策略目前只搭了框架，未接入UI**：
+   `providers/text/mod.rs` 里的 `LineIndex`、`spawn_highlight_worker`、
+   `ViewportHighlightRequest` 这套异步管线已经写好且有单元测试覆盖核心逻辑
+   （行索引切片、请求代次过期判断），但 `core/window.rs` 当前为了先把
+   四个模块的核心解码/渲染逻辑跑通，走的是同步全文高亮的简单路径。
+   把这套异步管线接到 `ScrollArea` 的滚动回调上、真正做到"大文件不卡顿"，
+   是下一步需要补上的接线工作，目前的实现对中小文件完全够用，
+   只是还没有真正验证过对超大文件（比如几十MB的日志）的表现。
 
-| Operation | Reason |
-|-----------|--------|
-| `hush optimize --network` (ARP flush) | `route flush` needs root |
-| `hush clean --system` (Spotlight reindex) | `mdutil` needs root |
-| `purge_inactive_memory` | `purge` needs root |
-| `/Library/LaunchDaemons` agent removal | System-level paths |
+6. **动图(gif)播放机制**：用 `ctx.request_repaint_after` 做帧定时切换，
+   已经接入 `eframe::App::update`，逻辑上是完整的，但同样没有在真实
+   GUI环境里跑过，建议你测试时专门用一个动图验证播放效果是否流畅。
 
-Run `sudo hush optimize` once at setup time to apply all root-level tweaks.
-
----
-
-## Logs
-
-```bash
-tail -f ~/Library/Logs/hush.log           # daemon output
-RUST_LOG=debug hush clean                 # verbose one-shot
-RUST_LOG=info hush snapshot --list        # info-level output
-```
-
----
-
-## FAQ
-
-**Will this break my apps?**
-The `guard.rs` hard-block list and critical bundle checks prevent touching anything system-critical. `risky`-rated entries (Docker, Ollama models) are never auto-deleted.
-
-**Can I undo a clean?**
-Not automatically. Use `hush clean -n` (dry-run) first to see exactly what will be removed.
-
-**Why does `hush crush` not kill `[process]`?**
-It's either in `whitelist.apps`, starts with `com.apple.`, or its process name doesn't match `rogue_list.process_names`. Add it to the rogue list or run `hush crush "Exact Process Name"`.
-
-**Does Hush need Full Disk Access?**
-No. All paths are within user-space (`~/Library`). System-level paths requiring FDA are blocked by `guard::requires_fda()` and skipped with a log entry, not a permission prompt.
+7. **onas_bridge 完全未实现**：`providers/mod.rs` 里特意留了注释占位，
+   等你确认 onas 的调用方式（子进程/输出协议）后再回来补上这部分，
+   dispatcher/window.rs 里的 `RequiresOnas` 分支已经预留好了接入点。
