@@ -1,14 +1,15 @@
 [package]
-name = "quicklook_rs"
+name = "rooq"
 version = "0.1.0"
 edition = "2021"
+authors = ["asong56"]
 # 注意：现代 egui/epaint 系列要求 rustc 1.76+。
 # 本项目在你自己的开发机上编译，请确保工具链是当前 stable
 # （建议用 rustup 装最新 stable，不要用发行版仓库自带的旧版 rustc/cargo）。
 rust-version = "1.76"
 
 [[bin]]
-name = "quicklook_rs"
+name = "rooq"
 path = "src/main.rs"
 
 [dependencies]

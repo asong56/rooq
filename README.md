@@ -1,4 +1,4 @@
-# quicklook_rs — 本次交付说明
+# Rooq — 本次交付说明
 
 本次交付范围：**不需要 onas 的四个模块**——图片(jpg/png/gif，InMemory 路径)、
 PDF(仅前6页，纯内存缓存)、文本/代码查看器(tree-sitter/syntastica 高亮)、
@@ -62,7 +62,7 @@ rustup update stable
 rustc --version   # 确认版本号
 
 # 2. 编译
-cd quicklook_rs
+cd rooq
 cargo build --release
 ```
 

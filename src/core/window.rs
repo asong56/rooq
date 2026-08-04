@@ -1,14 +1,17 @@
 //! 主窗口 / eframe App 状态。
 //!
-//! 本次交付范围：把已经写好的四个 provider（图片InMemory、PDF、文本、Markdown）
-//! 接到一个可以实际运行、看到东西的 egui 窗口里。onas 相关的部分
-//! （webp/avif、mkv/webm）不在本次范围内——dispatcher 遇到
-//! `FileCategory::RequiresOnas` 时，目前只显示一个"暂不支持，等待onas集成"
-//! 的占位提示，不会崩溃，也不会假装能处理。
+//! 图片（jpg/png/gif InMemory + webp/avif 经 onas_bridge）、PDF、文本、
+//! Markdown 都已经接进了这个 egui 窗口。mkv/webm 视频仍然不在范围内——
+//! 不是"还没接"，是核实过 onas 现有 CLI 后确认它没有单帧提取能力，
+//! 具体原因见 `FileCategory::RequiresOnas(OnasReason::VideoMkvOrWebm)`
+//! 分支旁的注释和 `providers/onas_bridge/mod.rs` 顶部说明。dispatcher
+//! 遇到这个分支时显示一个如实反映现状的占位提示，不会崩溃，
+//! 也不会假装能处理。
 
 use crate::core::dispatcher::{self, FileCategory, ImageRoute, InMemoryImageKind, TextKind};
 use crate::core::request_gen::RequestGenerator;
 use crate::providers::image as image_provider;
+use crate::providers::onas_bridge;
 use crate::providers::pdf::PdfProvider;
 use crate::providers::text::{self, highlight, markdown::MarkdownProvider};
 use eframe::egui;
@@ -118,7 +121,7 @@ fn load_cjk_fallback_font(ctx: &egui::Context) {
     );
 }
 
-pub struct QuickLookApp {
+pub struct RooqApp {
     request_gen: RequestGenerator,
     pdf_provider: PdfProvider,
     markdown_provider: MarkdownProvider,
@@ -130,7 +133,7 @@ pub struct QuickLookApp {
     code_theme: syntastica::theme::ResolvedTheme,
 }
 
-impl QuickLookApp {
+impl RooqApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // 本轮深度优化新增：加载系统CJK字体作为后备，解决中文显示为方块
         // 的问题（egui 默认字体不含CJK字形，且egui本身没有自动侦测缺字后
@@ -177,16 +180,22 @@ impl QuickLookApp {
             FileCategory::Pdf => self.load_pdf(ctx, path),
             FileCategory::Text(TextKind::Markdown) => self.load_markdown(path),
             FileCategory::Text(TextKind::PlainOrCode) => self.load_text(path),
-            FileCategory::RequiresOnas(reason) => {
-                let reason_str = match reason {
-                    dispatcher::OnasReason::ImageWebpOrAvif => {
-                        "webp/avif 需要 onas 解码，本次交付范围未接入"
-                    }
-                    dispatcher::OnasReason::VideoMkvOrWebm => {
-                        "mkv/webm 需要 onas 解码，本次交付范围未接入"
-                    }
-                };
-                PreviewState::RequiresOnasPlaceholder { reason: reason_str }
+            FileCategory::RequiresOnas(dispatcher::OnasReason::ImageWebpOrAvif) => {
+                self.load_onas_image(ctx, path)
+            }
+            FileCategory::RequiresOnas(dispatcher::OnasReason::VideoMkvOrWebm) => {
+                // TODO(video-thumbnail): 核实过 onas 源码后确认：它现有 CLI 只有
+                // "整个视频文件转码到另一个 mkv"这一条路径，没有按时间戳/帧号
+                // 取单帧的能力，也没有输出图片格式的选项——即使愿意付出整段
+                // 转码的代价，转码完拿到的还是一个 mkv，Rooq 自己没有
+                // 视频帧解码器，依然拿不到能上屏的像素。这不是"暂时没接"，
+                // 是 onas 那边需要先加一个新子命令（解出一帧就停、编码成图片）
+                // 才可能打通，详见 quicklook-rust-plan-v3.md 第6节 TODO
+                // 和 providers/onas_bridge/mod.rs 顶部注释。
+                PreviewState::RequiresOnasPlaceholder {
+                    reason: "mkv/webm 缩略图需要 onas 先增加单帧提取子命令，\
+                             现有 onas 接口只支持整文件转码，暂不支持",
+                }
             }
             FileCategory::Unsupported => {
                 PreviewState::Error("无法识别的文件类型".to_string())
@@ -201,54 +210,81 @@ impl QuickLookApp {
         kind: InMemoryImageKind,
     ) -> PreviewState {
         match image_provider::decode(path, kind) {
-            Ok(decoded) => {
-                if decoded.is_animated() {
-                    let frames = decoded
-                        .frames
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, f)| {
-                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                                [f.width as usize, f.height as usize],
-                                &f.rgba8,
-                            );
-                            let texture = ctx.load_texture(
-                                format!("anim_frame_{i}"),
-                                color_image,
-                                egui::TextureOptions::LINEAR,
-                            );
-                            (texture, f.delay.unwrap_or(std::time::Duration::from_millis(100)))
-                        })
-                        .collect::<Vec<_>>();
-                    // 用第一帧的纹理句柄作为 PreviewState::Image 的主纹理占位，
-                    // 实际渲染时 UI 层会优先检查 anim 字段并播放帧序列。
-                    let first_texture = frames[0].0.clone();
-                    PreviewState::Image {
-                        texture: first_texture,
-                        anim: Some(AnimState {
-                            frames,
-                            current_frame: 0,
-                            last_switch: Instant::now(),
-                        }),
-                    }
-                } else {
-                    let f = &decoded.frames[0];
+            Ok(decoded) => Self::decoded_image_to_preview_state(ctx, decoded),
+            Err(e) => PreviewState::Error(format!("图片解码失败: {e}")),
+        }
+    }
+
+    /// webp/avif 分支：先用 onas 子进程把原图转换成一个临时 PNG
+    /// （见 providers/onas_bridge），再复用现成的 PNG InMemory 解码路径
+    /// （zune-png）读出 RGBA8——onas 只负责"啃 webp/avif 这两种冷门格式"，
+    /// 读像素、建纹理这些后续步骤和本地 jpg/png/gif 完全共用同一套逻辑，
+    /// 不需要为"来自 onas 的图片"单独写一条渲染路径。
+    ///
+    /// 转换结果是一个临时文件（onas 只支持写文件、不支持 stdout），
+    /// `TempPngFile` 是 RAII guard，读完像素后随 `temp_png` 这个绑定
+    /// 在函数结束时自动析构、删除临时文件，磁盘上不留痕迹。
+    fn load_onas_image(&mut self, ctx: &egui::Context, path: &PathBuf) -> PreviewState {
+        let temp_png = match onas_bridge::convert_image_to_png(path) {
+            Ok(guard) => guard,
+            Err(e) => return PreviewState::Error(format!("onas 转换失败: {e}")),
+        };
+
+        match image_provider::decode(temp_png.path(), InMemoryImageKind::Png) {
+            Ok(decoded) => Self::decoded_image_to_preview_state(ctx, decoded),
+            Err(e) => PreviewState::Error(format!("onas 转换成功，但读取结果失败: {e}")),
+        }
+        // temp_png 在这里出作用域并析构，临时 PNG 随之删除——
+        // 此时像素数据已经上传成纹理（GPU 端持有自己的拷贝），
+        // 源文件可以安全丢弃。
+    }
+
+    /// 把解码结果（不区分来自本地 jpg/png/gif 还是 onas 转换出的 PNG）
+    /// 变成可渲染的 PreviewState，动图/静态图分流逻辑只写这一份。
+    fn decoded_image_to_preview_state(
+        ctx: &egui::Context,
+        decoded: image_provider::DecodedImage,
+    ) -> PreviewState {
+        if decoded.is_animated() {
+            let frames = decoded
+                .frames
+                .into_iter()
+                .enumerate()
+                .map(|(i, f)| {
                     let color_image = egui::ColorImage::from_rgba_unmultiplied(
                         [f.width as usize, f.height as usize],
                         &f.rgba8,
                     );
                     let texture = ctx.load_texture(
-                        "static_image",
+                        format!("anim_frame_{i}"),
                         color_image,
                         egui::TextureOptions::LINEAR,
                     );
-                    PreviewState::Image {
-                        texture,
-                        anim: None,
-                    }
-                }
+                    (texture, f.delay.unwrap_or(std::time::Duration::from_millis(100)))
+                })
+                .collect::<Vec<_>>();
+            // 用第一帧的纹理句柄作为 PreviewState::Image 的主纹理占位，
+            // 实际渲染时 UI 层会优先检查 anim 字段并播放帧序列。
+            let first_texture = frames[0].0.clone();
+            PreviewState::Image {
+                texture: first_texture,
+                anim: Some(AnimState {
+                    frames,
+                    current_frame: 0,
+                    last_switch: Instant::now(),
+                }),
             }
-            Err(e) => PreviewState::Error(format!("图片解码失败: {e}")),
+        } else {
+            let f = &decoded.frames[0];
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [f.width as usize, f.height as usize],
+                &f.rgba8,
+            );
+            let texture = ctx.load_texture("static_image", color_image, egui::TextureOptions::LINEAR);
+            PreviewState::Image {
+                texture,
+                anim: None,
+            }
         }
     }
 
@@ -312,7 +348,7 @@ impl QuickLookApp {
     }
 }
 
-impl eframe::App for QuickLookApp {
+impl eframe::App for RooqApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 动图播放的帧推进逻辑：检查当前帧是否已经显示够了 delay 时长，
         // 是则切到下一帧并请求重绘。这里没有走独立的定时器线程，
@@ -337,7 +373,7 @@ impl eframe::App for QuickLookApp {
     }
 }
 
-impl QuickLookApp {
+impl RooqApp {
     fn draw_preview(&mut self, ui: &mut egui::Ui) {
         match &mut self.state {
             PreviewState::Empty => {
