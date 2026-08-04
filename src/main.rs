@@ -1,17 +1,18 @@
-//! quicklook_rs 程序入口。
+//! Rooq 程序入口。
 //!
-//! 本次交付范围：图片(jpg/png/gif，InMemory路径) + PDF(前6页) +
+//! 本次交付范围：图片(jpg/png/gif InMemory + webp/avif 经 onas_bridge) + PDF(前6页) +
 //! 文本/代码(tree-sitter高亮) + Markdown。
-//! webp/avif/mkv/webm 需要 onas，本次不实现，dispatcher 会分流到
-//! 一个"暂不支持"的占位提示，不会崩溃。
+//! mkv/webm 仍需要 onas 先增加单帧提取子命令才能接入（现有 onas CLI
+//! 只支持整文件转码，拿不出单帧图像，详见 providers/onas_bridge/mod.rs），
+//! dispatcher 会分流到一个如实说明现状的占位提示，不会崩溃。
 //!
-//! 用法：`quicklook_rs <文件路径>`，不传参数则显示空白等待界面
+//! 用法：`rooq <文件路径>`，不传参数则显示空白等待界面
 //! （对应"以后接入文件管理器右键预览调用"这个使用场景的最小占位）。
 
 mod core;
 mod providers;
 
-use core::window::QuickLookApp;
+use core::window::RooqApp;
 use std::path::PathBuf;
 
 fn main() -> eframe::Result<()> {
@@ -26,10 +27,10 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "QuickLook (Rust)",
+        "Rooq",
         native_options,
         Box::new(move |cc| {
-            let mut app = QuickLookApp::new(cc);
+            let mut app = RooqApp::new(cc);
             if let Some(path) = initial_path {
                 if path.exists() {
                     app.open_path(&cc.egui_ctx, path);
