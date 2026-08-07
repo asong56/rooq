@@ -32,15 +32,12 @@ pub fn detect_language(path: &std::path::Path) -> Option<Lang> {
         "java" => Lang::Java,
         "json" => Lang::Json,
         "yaml" | "yml" => Lang::Yaml,
-        "toml" => Lang::Toml,
         "sh" | "bash" | "zsh" => Lang::Bash,
         "html" | "htm" => Lang::Html,
         "css" => Lang::Css,
-        "xml" => Lang::Xml,
-        "sql" => Lang::Sql,
-        "rb" => Lang::Ruby,
-        "php" => Lang::Php,
         "lua" => Lang::Lua,
+        // toml/xml/sql/ruby/php aren't in syntastica-parsers' "some" feature
+        // set; switching to "most" in Cargo.toml would add them back.
         // Unrecognized extensions fall back to plain text, not an error.
         _ => return None,
     })
@@ -86,7 +83,7 @@ pub fn highlight_source(
         .process(source, lang)
         .map_err(|e| HighlightError::Parse(e.to_string()))?;
 
-    let themed: ThemedHighlights = resolve_styles(highlights, theme);
+    let themed: ThemedHighlights = resolve_styles(&highlights, theme);
 
     let lines = themed
         .into_iter()
@@ -118,12 +115,12 @@ pub fn build_layout_job(lines: &[HighlightedLine], base_font: FontId) -> LayoutJ
                         font_id: base_font.clone(),
                         color: s.color,
                         underline: if s.underline {
-                            egui::Stroke::new(1.0, s.color)
+                            egui::Stroke::new(1.0_f32, s.color)
                         } else {
                             egui::Stroke::NONE
                         },
                         strikethrough: if s.strikethrough {
-                            egui::Stroke::new(1.0, s.color)
+                            egui::Stroke::new(1.0_f32, s.color)
                         } else {
                             egui::Stroke::NONE
                         },

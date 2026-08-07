@@ -277,7 +277,7 @@ impl RooqApp {
 }
 
 impl eframe::App for RooqApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if let PreviewState::Image {
             anim: Some(anim), ..
         } = &mut self.state
@@ -288,10 +288,11 @@ impl eframe::App for RooqApp {
                 anim.current_frame = (anim.current_frame + 1) % anim.frames.len();
                 anim.last_switch = Instant::now();
             }
+            let ctx = ui.ctx().clone();
             ctx.request_repaint_after(current_delay.saturating_sub(elapsed));
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             self.draw_preview(ui);
         });
     }

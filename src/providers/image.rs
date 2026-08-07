@@ -101,10 +101,10 @@ fn decode_png(path: &Path) -> Result<DecodedImage, ImageProviderError> {
         .map_err(|e| ImageProviderError::PngDecode(e.to_string()))?;
 
     let colorspace = decoder
-        .get_colorspace()
+        .colorspace()
         .ok_or_else(|| ImageProviderError::PngDecode("could not read color space".into()))?;
     let info = decoder
-        .get_info()
+        .info()
         .ok_or_else(|| ImageProviderError::PngDecode("could not read image dimensions".into()))?;
     let (width, height) = (info.width as u32, info.height as u32);
 
