@@ -1,0 +1,90 @@
+name: Build Windows releases
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_name: x64
+            target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            zip_name: rooq-windows-x64.zip
+          - arch_name: arm64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            zip_name: rooq-windows-arm64.zip
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Point bindgen at the preinstalled LLVM/Clang
+        shell: pwsh
+        run: |
+          $llvmBin = (Get-Command clang -ErrorAction SilentlyContinue).Source
+          if ($llvmBin) {
+            $llvmDir = Split-Path $llvmBin
+            echo "LIBCLANG_PATH=$llvmDir" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "clang 不在 PATH 里，交给 bindgen 自己按默认规则去找（多数 Windows runner 镜像会把 LLVM 装在固定路径，bindgen-cli 的 clang_sys 探测逻辑认得那些默认路径）。"
+          }
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage release artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path stage | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\rooq.exe" "stage\rooq.exe"
+          if (Test-Path "README.md") { Copy-Item "README.md" "stage\README.md" }
+
+      - name: Package as zip (max compression)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            (Resolve-Path "stage").Path,
+            (Join-Path (Get-Location) "${{ matrix.zip_name }}"),
+            [System.IO.Compression.CompressionLevel]::SmallestSize,
+            $false
+          )
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.zip_name }}
+          path: ${{ matrix.zip_name }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/rooq-windows-x64.zip
+            artifacts/rooq-windows-arm64.zip
