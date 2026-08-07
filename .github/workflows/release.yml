@@ -16,10 +16,6 @@ jobs:
             target: x86_64-pc-windows-msvc
             runner: windows-latest
             zip_name: rooq-windows-x64.zip
-          - arch_name: arm64
-            target: aarch64-pc-windows-msvc
-            runner: windows-11-arm
-            zip_name: rooq-windows-arm64.zip
 
     runs-on: ${{ matrix.runner }}
     steps:
@@ -38,7 +34,7 @@ jobs:
             $llvmDir = Split-Path $llvmBin
             echo "LIBCLANG_PATH=$llvmDir" >> $env:GITHUB_ENV
           } else {
-            Write-Host "clang 不在 PATH 里，交给 bindgen 自己按默认规则去找（多数 Windows runner 镜像会把 LLVM 装在固定路径，bindgen-cli 的 clang_sys 探测逻辑认得那些默认路径）。"
+            Write-Host "clang not found on PATH; leaving it to bindgen's default detection (most Windows runner images install LLVM at a fixed path that clang_sys recognizes)."
           }
 
       - name: Build release binary
