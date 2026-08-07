@@ -15,9 +15,9 @@ pub enum FileCategory {
     Image(ImageRoute),
     Pdf,
     Text(TextKind),
-    /// 视频/webp/avif 等需要 onas 的类别，本次不实现，
-    /// 保留分支是为了让 dispatcher 的 match 保持穷尽性，
-    /// 后续接入 onas_bridge 时只需要在这里补上处理逻辑。
+    /// 需要 onas 子进程协助的类别：webp/avif 图片转换、mkv/webm 视频
+    /// 首帧缩略图。两者都已经在 `onas_bridge` 里接好（见该模块文档），
+    /// `RequiresOnas` 这个名字保留，只是不再意味着"占位未实现"。
     RequiresOnas(OnasReason),
     Unsupported,
 }

@@ -1,12 +1,10 @@
 //! 主窗口 / eframe App 状态。
 //!
 //! 图片（jpg/png/gif InMemory + webp/avif 经 onas_bridge）、PDF、文本、
-//! Markdown 都已经接进了这个 egui 窗口。mkv/webm 视频仍然不在范围内——
-//! 不是"还没接"，是核实过 onas 现有 CLI 后确认它没有单帧提取能力，
-//! 具体原因见 `FileCategory::RequiresOnas(OnasReason::VideoMkvOrWebm)`
-//! 分支旁的注释和 `providers/onas_bridge/mod.rs` 顶部说明。dispatcher
-//! 遇到这个分支时显示一个如实反映现状的占位提示，不会崩溃，
-//! 也不会假装能处理。
+//! Markdown、mkv/webm 视频首帧缩略图（同样经 onas_bridge）都已经接进了
+//! 这个 egui 窗口。视频分支复用和 webp/avif 完全相同的套路——onas 子进程
+//! 转出一张临时 PNG，再走本地已有的 PNG 解码/上屏管线，见
+//! `load_onas_video_frame` 和 `providers/onas_bridge/mod.rs` 顶部说明。
 
 use crate::core::dispatcher::{self, FileCategory, ImageRoute, InMemoryImageKind, TextKind};
 use crate::core::request_gen::RequestGenerator;
@@ -40,10 +38,6 @@ enum PreviewState {
     },
     Markdown {
         content: String,
-    },
-    /// onas 相关格式的占位提示，本次交付范围不实现具体解码。
-    RequiresOnasPlaceholder {
-        reason: &'static str,
     },
 }
 
@@ -184,18 +178,7 @@ impl RooqApp {
                 self.load_onas_image(ctx, path)
             }
             FileCategory::RequiresOnas(dispatcher::OnasReason::VideoMkvOrWebm) => {
-                // TODO(video-thumbnail): 核实过 onas 源码后确认：它现有 CLI 只有
-                // "整个视频文件转码到另一个 mkv"这一条路径，没有按时间戳/帧号
-                // 取单帧的能力，也没有输出图片格式的选项——即使愿意付出整段
-                // 转码的代价，转码完拿到的还是一个 mkv，Rooq 自己没有
-                // 视频帧解码器，依然拿不到能上屏的像素。这不是"暂时没接"，
-                // 是 onas 那边需要先加一个新子命令（解出一帧就停、编码成图片）
-                // 才可能打通，详见 quicklook-rust-plan-v3.md 第6节 TODO
-                // 和 providers/onas_bridge/mod.rs 顶部注释。
-                PreviewState::RequiresOnasPlaceholder {
-                    reason: "mkv/webm 缩略图需要 onas 先增加单帧提取子命令，\
-                             现有 onas 接口只支持整文件转码，暂不支持",
-                }
+                self.load_onas_video_frame(ctx, path)
             }
             FileCategory::Unsupported => {
                 PreviewState::Error("无法识别的文件类型".to_string())
@@ -237,6 +220,24 @@ impl RooqApp {
         // temp_png 在这里出作用域并析构，临时 PNG 随之删除——
         // 此时像素数据已经上传成纹理（GPU 端持有自己的拷贝），
         // 源文件可以安全丢弃。
+    }
+
+    /// mkv/webm 分支：onas（v0.2.0 新增 `frame` 子命令）从视频里解出一帧，
+    /// 编码成临时 PNG（见 providers/onas_bridge），再复用和 webp/avif
+    /// 完全相同的 PNG InMemory 解码路径读出 RGBA8。和 `load_onas_image`
+    /// 是同一个套路，唯一区别是子进程调用的是 `frame` 而不是 `image`——
+    /// 这层差异已经封装在 onas_bridge 内部，window.rs 这里不需要关心。
+    fn load_onas_video_frame(&mut self, ctx: &egui::Context, path: &PathBuf) -> PreviewState {
+        let temp_png = match onas_bridge::extract_video_frame(path) {
+            Ok(guard) => guard,
+            Err(e) => return PreviewState::Error(format!("onas 提取视频帧失败: {e}")),
+        };
+
+        match image_provider::decode(temp_png.path(), InMemoryImageKind::Png) {
+            Ok(decoded) => Self::decoded_image_to_preview_state(ctx, decoded),
+            Err(e) => PreviewState::Error(format!("onas 提取成功，但读取结果失败: {e}")),
+        }
+        // temp_png 出作用域析构，临时 PNG 自动删除，理由同 load_onas_image。
     }
 
     /// 把解码结果（不区分来自本地 jpg/png/gif 还是 onas 转换出的 PNG）
@@ -384,11 +385,6 @@ impl RooqApp {
             PreviewState::Error(msg) => {
                 ui.centered_and_justified(|ui| {
                     ui.colored_label(egui::Color32::from_rgb(220, 80, 80), msg.as_str());
-                });
-            }
-            PreviewState::RequiresOnasPlaceholder { reason } => {
-                ui.centered_and_justified(|ui| {
-                    ui.label(format!("暂不支持: {reason}"));
                 });
             }
             PreviewState::Image { texture, anim } => {

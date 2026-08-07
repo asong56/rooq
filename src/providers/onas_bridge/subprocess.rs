@@ -5,10 +5,16 @@
 //!   的扩展名决定；onas 内部把输入完整解码成一份 RGBA8，再按目标格式编码写盘。
 //!   没有"只解码不编码"的模式，也不支持输出到 stdout——每次调用都会
 //!   实实在在往磁盘写一个完整的文件，这是 onas 当前 CLI 唯一支持的形态。
+//! - `onas frame <input> <output> [--at SECONDS]`：从视频中解出单帧，编码成
+//!   图片写盘（v0.2.0 新增子命令，之前版本没有）。不传 `--at` 时按 onas 侧
+//!   实现取默认帧（起始位置），本文件固定不传，只要"随便一帧能当缩略图"，
+//!   不需要指定具体时间点。
 //! - 错误处理：onas 的 `main()` 返回 `anyhow::Result<()>`，任何失败都让进程
-//!   以 exit code 1 退出，并把完整错误链（"Error: ...\n\nCaused by:\n  0: ..."）
-//!   打到 stderr。没有区分错误类型的退出码，也没有结构化（JSON等）错误输出，
-//!   这里只能把 stderr 整体当成人类可读文本，不做进一步的机器解析。
+//!   以非零 exit code 退出（v0.2.0 起区分了具体错误类型，见 onas 的
+//!   `exitcode` 模块），并把完整错误链（"Error: ...\n\nCaused by:\n  0: ..."）
+//!   打到 stderr。这里目前仍只把 stderr 整体当人类可读文本展示给用户，
+//!   不区分退出码——Rooq 只关心"成功还是失败"，具体是哪类失败对用户提示
+//!   来说不需要区分，暂不解析 exit code。
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -39,6 +45,12 @@ pub enum OnasBridgeError {
 /// 兜底熔断点，避免 UI 线程被无限期阻塞（当前 window.rs 里所有 provider
 /// 调用仍是同步的，见 core/window.rs 顶部注释）。
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `onas frame` 的超时上限，比图片转换更宽松。取首帧本身很快，
+/// 但视频解码器（尤其 H.265/VP9/AV1）的初始化开销比 webp/avif 静态图
+/// 解码更重，且不排除用户预览的是体积异常大的 mkv/webm，给更充裕的
+/// 熔断阈值避免"文件稍大就误判为卡死"的假阳性。
+const FRAME_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 定位 onas 可执行文件，按优先级依次尝试：
 /// 1. `ROOQ_ONAS` 环境变量（显式覆盖，调试/自定义部署路径用）
@@ -103,12 +115,32 @@ pub(super) fn temp_output_path(target_ext: &str) -> PathBuf {
 /// 调用 `onas image <input> <output>`，同步阻塞直到完成、超时、或失败。
 /// 成功时 `output` 路径上已经写好了转换结果，调用方负责读取和清理。
 pub(super) fn run_onas_image_convert(input: &Path, output: &Path) -> Result<(), OnasBridgeError> {
+    run_onas(
+        &["image", &input.display().to_string(), &output.display().to_string()],
+        CALL_TIMEOUT,
+    )
+}
+
+/// 调用 `onas frame <input> <output>`，同步阻塞直到完成、超时、或失败。
+/// 成功时 `output` 路径上已经写好了提取出的单帧图片。不传 `--at`：
+/// 缩略图场景只要"随便一帧"即可，不需要指定具体时间点，onas 侧默认取
+/// 起始位置的帧就够用——省掉了"该取第几秒"这个本来就没有好答案的决定。
+pub(super) fn run_onas_frame_extract(input: &Path, output: &Path) -> Result<(), OnasBridgeError> {
+    run_onas(
+        &["frame", &input.display().to_string(), &output.display().to_string()],
+        FRAME_CALL_TIMEOUT,
+    )
+}
+
+/// 共享的子进程调用逻辑：定位可执行文件、跑进程、排空管道、超时熔断。
+/// `image` 和 `frame` 子命令的调用形态完全一致（`onas <subcmd> <in> <out>`，
+/// 同样的错误处理约定），只是超时上限不同（见调用方注释），没有必要
+/// 各写一份重复的进程管理代码。
+fn run_onas(args: &[&str], timeout: Duration) -> Result<(), OnasBridgeError> {
     let onas = locate_onas()?;
 
     let mut child = Command::new(&onas)
-        .arg("image")
-        .arg(input)
-        .arg(output)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -139,7 +171,7 @@ pub(super) fn run_onas_image_convert(input: &Path, output: &Path) -> Result<(), 
         match child.try_wait().map_err(OnasBridgeError::WaitFailed)? {
             Some(status) => break status,
             None => {
-                if start.elapsed() > CALL_TIMEOUT {
+                if start.elapsed() > timeout {
                     // kill() 关闭子进程的标准句柄，两个读线程的
                     // read_to_string 会随之自然返回（EOF），不会悬挂，
                     // 后面的 join() 可以放心调用、不会无限期阻塞。
@@ -147,7 +179,7 @@ pub(super) fn run_onas_image_convert(input: &Path, output: &Path) -> Result<(), 
                     let _ = child.wait();
                     let _ = stdout_reader.join();
                     let _ = stderr_reader.join();
-                    return Err(OnasBridgeError::Timeout(CALL_TIMEOUT));
+                    return Err(OnasBridgeError::Timeout(timeout));
                 }
                 std::thread::sleep(Duration::from_millis(15));
             }

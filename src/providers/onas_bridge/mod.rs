@@ -1,27 +1,19 @@
 //! onas_bridge：Rooq 与 onas 子进程之间的桥接层。
 //!
-//! **当前范围：只接了图片的 webp/avif 分支**
-//! （对应 `dispatcher::OnasReason::ImageWebpOrAvif`）。
+//! 覆盖图片的 webp/avif 分支（`OnasReason::ImageWebpOrAvif`）和视频的
+//! mkv/webm 缩略图分支（`OnasReason::VideoMkvOrWebm`）。
 //!
-//! 视频（`OnasReason::VideoMkvOrWebm`）没有接进来——不是图省事没做，
-//! 是核实过 onas 源码（v0.2.0）之后确认它现有 CLI 压根没有"从视频文件里
-//! 拿出一帧图像"的能力：
+//! 视频分支曾经被现有 onas 接口挡住：旧版 onas 只有 `onas video
+//! <input> <output.mkv>`——整个文件从头到尾解码、重新编码、写出另一个
+//! 完整 mkv，没有按时间戳/帧号取单帧的参数，也没有任何输出图片格式的
+//! 选项。即使愿意付出"整段转码"的代价，拿到手的依然是另一个 mkv，
+//! Rooq 自己没有视频帧解码器，还是拿不到能上屏的像素。
 //!
-//! - `onas video <input> <output.mkv>` 只有"整个文件从头到尾解码、
-//!   重新编码（或至少完整解复用）、再写出一个完整 mkv"这一条路径，
-//!   没有按时间戳/帧号取单帧的参数，也没有任何输出图片格式的选项。
-//! - `onas image` 的格式探测（`Fmt::from_path`）只认
-//!   jpg/png/webp/avif/jxl 五种扩展名，传一个 .mkv/.webm 进去在真正开始
-//!   处理前就会直接报错退出。
-//!
-//! 也就是说，即使愿意为了一张缩略图付出"整个视频转码一遍"的代价，
-//! 转码完拿到的还是另一个 .mkv 文件，Rooq 自己没有视频帧解码器，
-//! 依然拿不到能上屏的像素——这不是"慢一点但能用"的取舍题，是现有接口
-//! 下根本走不通。要打通这个分支，需要先给 onas 加一个新的子命令
-//! （复用它已有的 H.264/H.265/VP9/AV1 解码器，解出一帧就停、编码成图片，
-//! 跳过整段重新编码+封装 mkv 的流程），这是 onas 那边的改造，
-//! 不是这一层 subprocess.rs 能绕过去的问题。在那之前，
-//! `core/window.rs` 里 `VideoMkvOrWebm` 分支继续走占位提示。
+//! **现状（onas v0.2.0 新增 `frame` 子命令后已打通）**：onas 现在有
+//! `onas frame <input> <output>` ——复用它已有的 H.264/H.265/VP9/AV1
+//! 解码器，解出单帧就停、直接编码成 PNG/JPEG 写出，不再需要整段转码。
+//! Rooq 这边用法和 webp/avif 图片分支完全一致：子进程转出一张临时 PNG，
+//! 再复用现成的 PNG InMemory 解码路径读出 RGBA8。
 
 mod subprocess;
 
@@ -68,5 +60,15 @@ impl Drop for TempPngFile {
 pub fn convert_image_to_png(input: &Path) -> Result<TempPngFile, OnasBridgeError> {
     let output = subprocess::temp_output_path("png");
     subprocess::run_onas_image_convert(input, &output)?;
+    Ok(TempPngFile(output))
+}
+
+/// 从一个 mkv/webm 视频里提取一帧，输出成临时 PNG 文件（子进程调用
+/// `onas frame <input> <临时路径>.png`）。用法和上面的 `convert_image_to_png`
+/// 完全对称：同样用 PNG 做中转格式（无损，读取端复用 zune-png），
+/// 同样返回 RAII guard，读完像素后自动删除临时文件，不落盘残留。
+pub fn extract_video_frame(input: &Path) -> Result<TempPngFile, OnasBridgeError> {
+    let output = subprocess::temp_output_path("png");
+    subprocess::run_onas_frame_extract(input, &output)?;
     Ok(TempPngFile(output))
 }

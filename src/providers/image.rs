@@ -12,8 +12,9 @@
 //!   "各用各的强项"比"图省事整体套用一个通用库"更贴近
 //!   "刚好覆盖需要的功能、不多不少"这个目标。
 //!
-//! webp/avif 不在本文件处理范围内：走 onas_bridge 子进程转出临时 PNG，
-//! 再回到这里的 PNG 分支解码（见 core/window.rs 的 load_onas_image）。
+//! webp/avif 图片和 mkv/webm 视频首帧都不在本文件处理范围内：走
+//! onas_bridge 子进程转出临时 PNG，再回到这里的 PNG 分支解码
+//! （见 core/window.rs 的 load_onas_image / load_onas_video_frame）。
 
 use crate::core::dispatcher::InMemoryImageKind;
 use image::{AnimationDecoder, ImageError};

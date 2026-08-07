@@ -1,10 +1,7 @@
 //! Rooq 程序入口。
 //!
 //! 本次交付范围：图片(jpg/png/gif InMemory + webp/avif 经 onas_bridge) + PDF(前6页) +
-//! 文本/代码(tree-sitter高亮) + Markdown。
-//! mkv/webm 仍需要 onas 先增加单帧提取子命令才能接入（现有 onas CLI
-//! 只支持整文件转码，拿不出单帧图像，详见 providers/onas_bridge/mod.rs），
-//! dispatcher 会分流到一个如实说明现状的占位提示，不会崩溃。
+//! 文本/代码(tree-sitter高亮) + Markdown + 视频首帧缩略图(mkv/webm 经 onas_bridge)。
 //!
 //! 用法：`rooq <文件路径>`，不传参数则显示空白等待界面
 //! （对应"以后接入文件管理器右键预览调用"这个使用场景的最小占位）。
