@@ -1,8 +1,8 @@
 # Rooq 精简重写技术方案 v3（Rust / Single Binary，复用 onas）
 
-**范围**：图片（jpg/png/webp/avif/gif）+ 文本/代码/Markdown 查看器 + PDF + 视频（mkv/webm，**首帧缩略图暂缓，见第6节 TODO**）。
+**范围**：图片（jpg/png/webp/avif/gif）+ 文本/代码/Markdown 查看器 + PDF + 视频（mkv/webm，首帧缩略图，见第6节——最初被 onas 接口挡住，onas v0.2.0 加了 `frame` 子命令后已打通）。
 GUI 框架：egui + eframe（纯 Rust 静态链接，理由见 v2 方案，此处不再重复论证）。
-onas：你自建的 Rust 编译产物（独立 app，非 crate），用于处理图像（webp/avif）与视频（mkv/webm）解码。**onas 的 CLI 接口已核实源码确认（v0.2.0）**，图片 webp/avif 分支已经打通；视频分支被 onas 现有接口挡住，详见第6节。
+onas：你自建的 Rust 编译产物（独立 app，非 crate），用于处理图像（webp/avif）与视频（mkv/webm）解码。**onas 的 CLI 接口已核实源码确认（v0.2.0）**，图片 webp/avif 分支和视频首帧分支均已打通，详见第6节。
 
 ---
 
@@ -169,19 +169,23 @@ rooq/  (egui + eframe, 纯Rust静态链接)
 ├── providers/
 │   ├── image.rs            # jpg/png/gif走image crate；webp/avif走onas_bridge（已实现）
 │   ├── pdf.rs              # pdfium-render，仅渲染前6页转jpg存入cache_store，硬上限，不支持第7页及以后
-│   ├── video.rs            # TODO：首帧缩略图，被onas现有接口挡住，见第6节
 │   ├── onas_bridge/
-│   │   ├── mod.rs          # 公开API：convert_image_to_png 等具体函数。
+│   │   ├── mod.rs          # 公开API：convert_image_to_png、extract_video_frame
 │   │   │                   # 没有做 FrameDecoder trait 抽象——onas是唯一实现路径
 │   │   │                   # （独立app，非crate，没有"直接link为库"这个选项），
 │   │   │                   # 一条路径不需要trait来对付"未来可能换实现"这种不存在的需求
-│   │   └── subprocess.rs   # 子进程路线：定位可执行文件/超时/stderr处理，已实现（仅图片分支）
+│   │   └── subprocess.rs   # 子进程路线：定位可执行文件/超时/stderr处理，已实现（图片+视频两个分支）
 │   └── text/
 │       ├── mod.rs          # 编码探测(chardetng) + 大文件视口按需解析调度
 │       ├── highlight.rs    # syntastica集成，tree-sitter驱动的高亮 -> egui LayoutJob
 │       └── markdown.rs     # egui_commonmark集成
 └── main.rs
 ```
+
+注：视频首帧没有单独的 `providers/video.rs`——`onas_bridge::extract_video_frame`
+转出临时 PNG 后，直接复用 `image.rs` 现成的 PNG 解码路径，调用方是
+`core/window.rs` 里的 `load_onas_video_frame`，和 webp/avif 分支
+（`load_onas_image`）是完全对称的两个函数，没有必要为视频单独开一个 provider 文件。
 
 ---
 
@@ -191,21 +195,19 @@ onas 已确认是**独立 Rust 编译的 app（非crate）**，`onas_bridge` 只
 
 拿到 onas 源码后核实了 `cli.rs`/`image.rs`/`video.rs`/`meta.rs`，原来列的5个问题现在都有确定答案：
 
-1. **有没有"提取单帧"子命令？** 没有。onas 只有整文件转换：`onas image <in> <out>`（图片格式转换）和 `onas video <in> <out.mkv>`（视频转码）。
-2. **输出到 stdout 还是文件？** 只支持文件。两个子命令都是老老实实往 `<output>` 参数指定的路径写一个完整文件，没有 stdout 这个选项。
-3. **输出文件名/路径谁定？** 调用方定——`<output>` 是普通的位置参数，onas 只是照着写，这部分和预期一致，`subprocess.rs` 可以指到临时目录里去。
-4. **mkv/webm 有没有按时间戳/百分比取一帧的参数？** 没有，一个都没有。`onas video` 不管传什么参数都会把输入文件从头到尾完整解复用一遍（`--vcodec copy` 模式下跳过重新编码，但依然要读完整个文件的所有包才能写出结果），没有"提前退出"这条路。
-5. **错误处理/退出码约定？** `main()` 返回 `anyhow::Result<()>`，失败时进程 exit code 1，完整错误链（"Error: ...\nCaused by:..."）打到 stderr，没有区分错误类型的退出码，也没有结构化输出。`subprocess.rs` 只能把 stderr 整体当人类可读文本展示，不做机器解析。
+1. **有没有"提取单帧"子命令？** 有——`onas frame <input> <output> [--at SECONDS]`，从视频里解出单帧编码成 PNG/JPEG。这是 onas v0.2.0 新增的子命令，写这份方案最初的版本时确认过还没有，后来 onas 更新后已经打通，详见下方"视频首帧缩略图"一节。
+2. **输出到 stdout 还是文件？** 只支持文件。`image`/`frame` 两个子命令都是老老实实往 `<output>` 参数指定的路径写一个完整文件，没有 stdout 这个选项。
+3. **输出文件名/路径谁定？** 调用方定——`<output>` 是普通的位置参数，onas 只是照着写，这部分和预期一致，`subprocess.rs` 指到临时目录里去。
+4. **mkv/webm 有没有按时间戳/百分比取一帧的参数？** 有，`--at SECONDS`（时间戳）和 `--at-frame N`（帧号）二选一，互斥参数。不传时 onas 默认取第一帧（`pipeline::extract_frame` 里 `(None, None) => true // default: first frame`），这正好符合"随便一帧当缩略图"的需要，`subprocess.rs` 里两个都不传。
+5. **错误处理/退出码约定？** `main()` 返回 `anyhow::Result<()>`，失败时进程以非零 exit code 退出（v0.2.0 起区分了具体错误类型，见 onas 的 `exitcode` 模块），完整错误链（"Error: ...\nCaused by:..."）打到 stderr。`subprocess.rs` 目前仍只把 stderr 整体当人类可读文本展示，不解析具体退出码——Rooq 只关心"成功还是失败"，暂不需要更细的区分。
 
-图片 webp/avif 分支据此已经实现并接入了 `dispatcher`/`window.rs`：onas 转出临时 PNG（无损、不引入二次有损），复用 `providers/image.rs` 现成的 zune-png 解码路径，临时文件用 RAII guard 包一层，读完就删，不留盘——和第2节 PDF 缓存"不落盘"的原则保持一致（这里落盘本身没法避免，onas 只支持写文件，但生命周期收紧到"这一次调用期间"）。
+图片 webp/avif 分支和视频 mkv/webm 首帧分支，实现思路完全一致：onas 转出临时 PNG（无损、不引入二次有损），复用 `providers/image.rs` 现成的 zune-png 解码路径，临时文件用 RAII guard 包一层，读完就删，不留盘——和第2节 PDF 缓存"不落盘"的原则保持一致（这里落盘本身没法避免，onas 只支持写文件，但生命周期收紧到"这一次调用期间"）。
 
-### TODO：视频首帧缩略图（v1 不做，onas 现有接口做不到，不是"暂时没接"）
+### 视频首帧缩略图（已打通，不再是 TODO）
 
-核实完才发现这个坑比预想的深：**"整文件转码换取一帧缩略图"这条退路根本不存在**。原因很直接——`onas video` 无论怎么调用，输出都只会是另一个 `.mkv` 文件，从来不是图片；而 `onas image` 的格式探测（`Fmt::from_path`）只认 jpg/png/webp/avif/jxl 五种扩展名，喂一个 `.mkv`/`.webm` 进去在真正开始处理前就直接报错。也就是说：就算愿意付出"整段视频转码一遍"的代价，转码完手里还是一个视频文件，Rooq 自己没有视频帧解码器（这正是 onas 存在的原因），依然拿不到能上屏的像素。不是"贵不贵"的取舍题，是现有接口下压根走不通。
+最初写这份方案时确认过"整文件转码换取一帧缩略图"这条退路走不通：`onas video` 无论怎么调用，输出都只会是另一个 `.mkv` 文件，从来不是图片；Rooq 自己没有视频帧解码器，转码完依然拿不到能上屏的像素。当时的结论是要等 onas 加一个新子命令才能打通。
 
-要打通这块，onas 那边需要先加一个新子命令：复用它已经有的 H.264/H.265/VP9/AV1 解码器，解出第一帧就停，直接编码成 PNG/JPEG 写出去，跳过"重新编码整段视频再封装mkv"这一整条流程。这是 onas 侧的改造，`Rooq` 这边的 `subprocess.rs`/`video.rs` 目前先不写，等 onas 有这个子命令之后再对接——不是代码写不出来，是没有可以调用的接口。
-
-在此之前：`providers/video.rs` 不存在（还没创建），`dispatcher.rs` 遇到 mkv/webm 会分流到 `FileCategory::RequiresOnas(OnasReason::VideoMkvOrWebm)`，`window.rs` 显示一个如实说明现状的占位提示，不会崩溃，也不会假装能处理。
+onas v0.2.0 加上了 `onas frame` 子命令后，这个缺口已经堵上：复用 onas 已有的 H.264/H.265/VP9/AV1 解码器，解出第一帧就停、直接编码成 PNG/JPEG，不再需要整段重新编码+封装 mkv。Rooq 这边对应加了 `onas_bridge::extract_video_frame` 和 `core/window.rs` 的 `load_onas_video_frame`，用法和图片分支（`convert_image_to_png` / `load_onas_image`）完全对称，详见这两个函数旁的注释。
 
 ---
 
@@ -215,4 +217,4 @@ onas 已确认是**独立 Rust 编译的 app（非crate）**，`onas_bridge` 只
 2. **图片 InMemory 路径**（jpg/png/gif）：验证 `dispatcher.rs` 分流逻辑的一半。
 3. **PDF 前6页缓存方案**：验证 `pdfium-render` 静态链接 + `cache_store.rs` 的设计，明确不做超过6页的任何渲染路径，这是本版方案里除 onas 对接外最大的独立工作量。
 4. **onas_bridge 打通（已完成，图片分支）**：`onas image` 子进程调用/超时/临时文件清理机制，接到了图片的 webp/avif 分支。
-5. **视频首帧缩略图（TODO，被 onas 现有接口挡住）**：不是"复用第4步"就能做的事——onas 现有 CLI 里没有任何路径能把一个视频文件变成一张图片，第4步打通的子进程调用机制本身没问题，但没有可以指向视频的 onas 子命令可用。等 onas 加上单帧提取子命令（见第6节 TODO）之后再排期。
+5. **视频首帧缩略图（已完成）**：`onas frame` 子命令上线后，复用第4步打通的子进程调用机制，加了 `extract_video_frame`/`load_onas_video_frame` 两个对称的函数接入视频分支，见第6节。

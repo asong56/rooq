@@ -53,7 +53,10 @@ egui = "0.34"
 # gif 仍用 image crate（禁用其余格式解码器，只留 gif 这一个），理由是
 # zune生态目前没有成熟的动图支持，image crate 的 AnimationDecoder
 # 已经很完善，没必要为了"整体统一用一个库"牺牲这块的成熟度。
-# webp/avif 不在这里，走 onas_bridge（本次不实现）。
+# webp/avif 图片、mkv/webm 视频首帧都不在这里：走 onas_bridge 子进程
+# 转出临时 PNG，再回到这里的 zune-png 分支解码（见
+# providers/onas_bridge/mod.rs 和 core/window.rs 的
+# load_onas_image / load_onas_video_frame）。
 zune-core = "0.5"
 zune-jpeg = "0.5"
 zune-png = "0.5"

@@ -1,11 +1,13 @@
-# Rooq — 本次交付说明
+# Rooq — 交付说明
 
-本次交付范围：**不需要 onas 的四个模块**——图片(jpg/png/gif，InMemory 路径)、
+已实现范围：图片(jpg/png/gif InMemory + webp/avif 经 onas_bridge)、
 PDF(仅前6页，纯内存缓存)、文本/代码查看器(tree-sitter/syntastica 高亮)、
-Markdown(egui_commonmark)。
+Markdown(egui_commonmark)、视频首帧缩略图(mkv/webm 经 onas_bridge)。
 
-webp/avif（图片）与 mkv/webm（视频）需要 onas，本次不实现；
-dispatcher 探测到这几类文件时会显示"暂不支持"的占位提示，不会崩溃。
+webp/avif 图片和 mkv/webm 视频都需要调用外部的 `onas` 子进程转出一张
+临时 PNG，再复用本地已有的 PNG 解码路径显示——onas 不是 rooq 的 Cargo
+依赖，是运行时按 `ROOQ_ONAS` 环境变量/同目录/PATH 顺序查找的独立可执行
+文件，找不到时会报错而不是崩溃，具体逻辑见 `providers/onas_bridge/`。
 
 ## 本轮深度优化改了什么
 
@@ -120,11 +122,14 @@ src/
 │   ├── mod.rs
 │   ├── dispatcher.rs           # 文件类型探测与分流（含单元测试）
 │   ├── request_gen.rs          # 请求代次管理，为后续onas异步接入预留（含单元测试）
-│   └── window.rs               # eframe主App，串联四个provider的UI渲染
+│   └── window.rs               # eframe主App，串联各 provider 的UI渲染
 └── providers/
     ├── mod.rs
     ├── image.rs                 # jpg/png走zune-jpeg/zune-png，gif走image crate（含单元测试）
     ├── pdf.rs                   # PDF前6页渲染+内存LRU缓存，引擎为mupdf（含单元测试）
+    ├── onas_bridge/
+    │   ├── mod.rs               # convert_image_to_png / extract_video_frame 对外接口
+    │   └── subprocess.rs        # onas 子进程调用：定位可执行文件、超时熔断（含单元测试）
     └── text/
         ├── mod.rs               # 编码探测(BOM/chardetng) + 大文件视口策略框架（含单元测试）
         ├── highlight.rs         # tree-sitter/syntastica高亮 -> egui LayoutJob（含单元测试）
@@ -191,6 +196,9 @@ src/
    已经接入 `eframe::App::update`，逻辑上是完整的，但同样没有在真实
    GUI环境里跑过，建议你测试时专门用一个动图验证播放效果是否流畅。
 
-9. **onas_bridge 完全未实现**：`providers/mod.rs` 里特意留了注释占位，
-   等你确认 onas 的调用方式（子进程/输出协议）后再回来补上这部分，
-   dispatcher/window.rs 里的 `RequiresOnas` 分支已经预留好了接入点。
+9. **onas_bridge 已实现，覆盖 webp/avif 图片和 mkv/webm 视频首帧两个分支**：
+   子进程调用 `onas image`/`onas frame` 转出临时 PNG，再复用本地已有的
+   zune-png 解码路径显示。onas 不是 Cargo 依赖，是运行时查找的独立
+   可执行文件（`ROOQ_ONAS` 环境变量 / 同目录 / PATH，见
+   `providers/onas_bridge/subprocess.rs` 里 `locate_onas` 的注释），
+   找不到、调用超时、或 onas 报错时会在预览区显示错误信息，不会崩溃。
