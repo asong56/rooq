@@ -12,6 +12,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # arm64 (aarch64-pc-windows-msvc) is not built: mupdf-sys only
+          # supports Win32/x64 with MSVC.
           - arch_name: x64
             target: x86_64-pc-windows-msvc
             runner: windows-latest
