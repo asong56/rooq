@@ -29,11 +29,33 @@ cargo build --release
 
 ## Usage
 
+Run `rooq` with no arguments to start it as a background daemon: it adds a
+tray icon and waits. Select a file in File Explorer and press Space to open
+a preview; press Space again to close it. No window appears until you press
+Space, and the process keeps running in the background between previews
+(exit it from the tray icon's "Exit" item).
+
+```bash
+rooq
+```
+
+Running `rooq path/to/file` instead opens that file directly in a normal
+window, independent of the daemon — useful for testing or for wiring into
+a right-click "Open with Rooq" entry.
+
 ```bash
 rooq path/to/file
 ```
 
-Or run `rooq` with no arguments and open a file through the UI.
+### How file selection works
+
+The daemon reads the selected file from the foreground Explorer window via
+Windows' Shell Automation COM interfaces (the same mechanism behind
+features like "Copy as path") — no Explorer extension or admin rights
+needed. The Space key is watched with a low-level keyboard hook rather than
+`RegisterHotKey`, and only acts when Explorer is the foreground window;
+Space presses everywhere else (typing, games, other apps) pass through
+untouched.
 
 ### The `onas` companion tool
 
@@ -50,7 +72,11 @@ preview area rather than crashing.
 
 ```
 src/
-├── main.rs                    Entry point; takes an optional file path argument
+├── main.rs                    Entry point: daemon mode (no args) or single-file mode (path arg)
+├── daemon/
+│   ├── mod.rs                  Ties the tray icon and keyboard hook to one Win32 message loop
+│   ├── hotkey.rs                WH_KEYBOARD_LL hook: detects Space in the foreground Explorer window
+│   └── selection.rs             Reads the selected file from Explorer via Shell Automation COM
 ├── core/
 │   ├── dispatcher.rs           File type detection (magic bytes, extension fallback) and routing
 │   ├── request_gen.rs          Generation counter to discard stale preview results on quick switching
@@ -95,6 +121,19 @@ regardless.
   `egui_commonmark`'s `better_syntax_highlighting` feature would pull in
   syntect, which the rest of the project avoids in favor of tree-sitter;
   the trade-off was made in favor of consistency over that one feature.
+- **Only the first selected file is previewed** when multiple files are
+  selected in Explorer; `daemon/selection.rs` reads item 0 of the
+  selection and ignores the rest.
+- **The daemon doesn't yet handle the desktop** as a selection source
+  (only File Explorer windows) — pressing Space with an icon selected on
+  the desktop does nothing, since the desktop isn't one of the windows
+  `IShellWindows` enumerates the same way.
+- **A second Space press may not register as toggle-off if the preview
+  window has taken OS focus** away from Explorer, since the hook only
+  treats Space as a toggle when Explorer is the foreground window; see
+  the comment on `run_daemon` in `main.rs`. `with_always_on_top()` avoids
+  deliberately stealing focus, but this hasn't been confirmed against a
+  real Explorer window.
 
 ## TODO
 
@@ -109,3 +148,13 @@ regardless.
   extraction, but its page-rendering path looked less battle-tested as of
   early 2026) and `fop-pdf-renderer` (pure Rust, but built for validating
   generator output rather than handling arbitrary real-world PDFs).
+- **The `daemon/` module's Shell Automation COM calls haven't been run
+  against a real Explorer window** — this environment has no Windows
+  machine to test against. The overall call chain (`IShellWindows` ->
+  match foreground `HWND` -> `IShellFolderViewDual::SelectedItems`) is
+  standard and documented, but the exact `VARIANT` construction for
+  `IShellWindows::Item`'s index parameter (flagged inline in
+  `selection.rs`) is the one call not verified against a real compile.
+- **No "start with Windows" option.** Right now the daemon only runs for
+  as long as it's manually launched each session; a real install would
+  want a Startup shortcut or registry entry, which doesn't exist yet.

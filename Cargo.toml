@@ -11,6 +11,32 @@ name = "rooq"
 path = "src/main.rs"
 
 [dependencies]
+# ---- Daemon: global hotkey + Explorer selection ----
+# Official Microsoft bindings; used for the low-level keyboard hook
+# (WH_KEYBOARD_LL, needed to detect a Space key-down without registering it
+# as a system-wide hotkey — RegisterHotKey would swallow every Space press
+# everywhere, including normal typing) and the Shell.Application COM
+# automation used to read the selected file from the foreground Explorer
+# window. Feature list kept to exactly the interfaces used:
+# WindowsAndMessaging for the hook, Shell + Com for the selection query,
+# Threading + ProcessStatus for identifying the foreground process as
+# explorer.exe.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+] }
+
+# ---- Daemon: tray icon ----
+# tray-icon (tauri-apps): Windows-native Shell_NotifyIconW wrapper. Needs a
+# Win32 message loop pumping on the same thread it's created on — reuses
+# the message loop already required for the WH_KEYBOARD_LL hook above,
+# rather than pulling in winit just to host a tray icon.
+tray-icon = "0.19"
+
 # ---- GUI ----
 # eframe's default features pull in wgpu (multi-backend DX12/Vulkan/Metal),
 # which is unnecessary weight for just blitting bitmaps to screen. glow

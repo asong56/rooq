@@ -6,6 +6,8 @@ use crate::providers::pdf::PdfProvider;
 use crate::providers::text::{self, highlight, markdown::MarkdownProvider};
 use eframe::egui;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 enum PreviewState {
@@ -87,10 +89,22 @@ pub struct RooqApp {
     state: PreviewState,
     current_path: Option<PathBuf>,
     code_theme: syntastica::theme::ResolvedTheme,
+    /// Set from another thread (the daemon's hotkey loop) to ask this
+    /// preview window to close, e.g. on a second Space press. `None` for
+    /// the plain CLI-viewer case where nothing outside the eframe app
+    /// itself needs to close the window.
+    close_requested: Option<Arc<AtomicBool>>,
 }
 
 impl RooqApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::with_close_signal(cc, None)
+    }
+
+    pub fn with_close_signal(
+        cc: &eframe::CreationContext<'_>,
+        close_requested: Option<Arc<AtomicBool>>,
+    ) -> Self {
         load_cjk_fallback_font(&cc.egui_ctx);
 
         let pdf_provider = PdfProvider::new();
@@ -102,6 +116,7 @@ impl RooqApp {
             state: PreviewState::Empty,
             current_path: None,
             code_theme: syntastica_themes::one::dark(),
+            close_requested,
         }
     }
 
@@ -278,6 +293,14 @@ impl RooqApp {
 
 impl eframe::App for RooqApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if let Some(flag) = &self.close_requested {
+            if flag.load(Ordering::SeqCst) {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+        }
+
         if let PreviewState::Image {
             anim: Some(anim), ..
         } = &mut self.state
@@ -295,6 +318,13 @@ impl eframe::App for RooqApp {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.draw_preview(ui);
         });
+
+        // Poll for the close signal even when nothing else triggers a
+        // repaint, so a second Space press closes the window promptly
+        // rather than waiting for unrelated input to wake the UI thread.
+        if self.close_requested.is_some() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
 }
 
