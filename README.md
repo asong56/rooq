@@ -76,7 +76,7 @@ src/
 ├── daemon/
 │   ├── mod.rs                  Ties the tray icon and keyboard hook to one Win32 message loop
 │   ├── hotkey.rs                WH_KEYBOARD_LL hook: detects Space in the foreground Explorer window
-│   └── selection.rs             Reads the selected file from Explorer via Shell Automation COM
+│   └── selection.rs             Reads the selected file from Explorer via Shell COM interfaces
 ├── core/
 │   ├── dispatcher.rs           File type detection (magic bytes, extension fallback) and routing
 │   ├── request_gen.rs          Generation counter to discard stale preview results on quick switching
@@ -148,13 +148,17 @@ regardless.
   extraction, but its page-rendering path looked less battle-tested as of
   early 2026) and `fop-pdf-renderer` (pure Rust, but built for validating
   generator output rather than handling arbitrary real-world PDFs).
-- **The `daemon/` module's Shell Automation COM calls haven't been run
-  against a real Explorer window** — this environment has no Windows
-  machine to test against. The overall call chain (`IShellWindows` ->
-  match foreground `HWND` -> `IShellFolderViewDual::SelectedItems`) is
-  standard and documented, but the exact `VARIANT` construction for
-  `IShellWindows::Item`'s index parameter (flagged inline in
-  `selection.rs`) is the one call not verified against a real compile.
+- **The `daemon/` module's Shell COM calls haven't been run against a real
+  Explorer window** — this environment has no Windows machine to test
+  against. The call chain (`IShellWindows` -> match foreground `HWND` ->
+  `IServiceProvider::QueryService` -> `IShellBrowser` ->
+  `IShellView::GetItemObject::<IShellItemArray>`) uses ordinary
+  vtable-based COM interfaces, which is more reliably bindable in
+  `windows-rs` than the `IDispatch`-only automation path an earlier
+  version of this file used (that version didn't compile — see git
+  history / prior error logs). The one remaining flagged risk is
+  `IShellWindows::Item`'s exact binding; see the caution note at the top
+  of `selection.rs`.
 - **No "start with Windows" option.** Right now the daemon only runs for
   as long as it's manually launched each session; a real install would
   want a Startup shortcut or registry entry, which doesn't exist yet.
