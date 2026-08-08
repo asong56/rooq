@@ -38,7 +38,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, IServiceProvider, CLSCTX_LOCAL_SERVER,
     COINIT_APARTMENTTHREADED,
 };
-use windows::Win32::System::Variant::{VARIANT, VT_I4};
+use windows::Win32::System::Variant::{VARENUM, VARIANT, VT_I4};
 use windows::Win32::UI::Shell::{
     IShellBrowser, IShellItemArray, IShellWindows, IWebBrowserApp, ShellWindows,
     SID_STopLevelBrowser, SIGDN_FILESYSPATH, SVGIO_SELECTION,
@@ -68,7 +68,7 @@ impl Drop for ComGuard {
 fn int_variant(value: i32) -> VARIANT {
     let mut variant = VARIANT::default();
     unsafe {
-        (*variant.Anonymous.Anonymous).vt = VT_I4.0 as u16;
+        (*variant.Anonymous.Anonymous).vt = VARENUM(VT_I4.0 as u16);
         (*variant.Anonymous.Anonymous).Anonymous.lVal = value;
     }
     variant
