@@ -3,14 +3,27 @@
 //! `Document.SelectedItems()`). This is the same mechanism Explorer's own
 //! "Copy as path" and similar shell tools use; no Explorer-side extension
 //! or hook is needed.
+//!
+//! CAUTION: this file has not been verified against a real compile (no
+//! Windows/Rust toolchain in the environment it was written in). The
+//! `IShellWindows`/`IShellFolderViewDual` automation surface used below
+//! comes from `windows-rs`'s IDispatch-derived bindings, which have proven
+//! easy to get wrong blind — `IShellWindows::Item` and
+//! `FolderItems::Item` both failed to resolve as written in an earlier
+//! draft (see project history). The VARIANT construction below follows a
+//! pattern confirmed from a working windows-rs 0.6x sample; the `Item`
+//! calls' exact signatures are the most likely remaining source of
+//! compile errors and should be checked against whatever `windows`
+//! version is actually pinned in Cargo.lock.
 
 use std::path::PathBuf;
-use windows::core::{Interface, Variant};
+use windows::core::Interface;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER,
     COINIT_APARTMENTTHREADED,
 };
+use windows::Win32::System::Variant::{VARIANT, VT_I4};
 use windows::Win32::UI::Shell::{IShellFolderViewDual, IShellWindows, IWebBrowserApp, ShellWindows};
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
@@ -32,6 +45,19 @@ impl Drop for ComGuard {
     }
 }
 
+/// Builds a `VT_I4` VARIANT wrapping a plain integer index, for calls like
+/// `IShellWindows::Item` that take a VARIANT-typed index. Wrapped in its
+/// own function since VARIANT's union layout is otherwise easy to get
+/// wrong (see module doc).
+fn int_variant(value: i32) -> VARIANT {
+    let mut variant = VARIANT::default();
+    unsafe {
+        (*variant.Anonymous.Anonymous).vt = VT_I4.0 as u16;
+        (*variant.Anonymous.Anonymous).Anonymous.lVal = value;
+    }
+    variant
+}
+
 /// Returns the path of the first selected item in the foreground Explorer
 /// window, or `None` if the foreground window isn't Explorer, nothing is
 /// selected, or the COM calls fail for any reason (missing Explorer window,
@@ -48,14 +74,7 @@ pub fn selected_file_in_foreground_explorer() -> Option<PathBuf> {
 
     let count = unsafe { shell_windows.Count().ok()? };
     for i in 0..count {
-        // NOTE: this VARIANT construction is the one call in this file not
-        // verified against a real compile (no Windows/Rust toolchain in
-        // the environment this was written in). If `Variant::from(i32)`
-        // doesn't satisfy `IShellWindows::Item`'s `&VARIANT` parameter,
-        // build a raw `windows::Win32::System::Variant::VARIANT` with
-        // `vt: VT_I4` and the value in the `Anonymous.Anonymous.Anonymous`
-        // union instead — see the VARIANT structure docs.
-        let index_variant = Variant::from(i);
+        let index_variant = int_variant(i);
         let item = match unsafe { shell_windows.Item(&index_variant) } {
             Ok(item) => item,
             Err(_) => continue,
@@ -66,8 +85,12 @@ pub fn selected_file_in_foreground_explorer() -> Option<PathBuf> {
             Err(_) => continue,
         };
 
+        // IWebBrowserApp::HWND returns SHANDLE_PTR (a pointer-sized
+        // integer wrapper, not a raw pointer); its inner value needs to
+        // go through an explicit conversion rather than a bare `as` cast
+        // between unrelated types.
         let hwnd = match unsafe { browser.HWND() } {
-            Ok(h) => HWND(h as isize as *mut core::ffi::c_void),
+            Ok(h) => HWND(h.0 as *mut core::ffi::c_void),
             Err(_) => continue,
         };
         if hwnd != foreground {
@@ -83,7 +106,8 @@ pub fn selected_file_in_foreground_explorer() -> Option<PathBuf> {
             return None;
         }
 
-        let first = unsafe { selected.Item(&Variant::from(0i32)).ok()? };
+        let first_variant = int_variant(0);
+        let first = unsafe { selected.Item(&first_variant).ok()? };
         let path = unsafe { first.Path().ok()? };
         return Some(PathBuf::from(path.to_string()));
     }
@@ -98,5 +122,12 @@ mod tests {
     #[test]
     fn com_guard_inits_and_drops_without_panicking() {
         let _guard = ComGuard::init().expect("CoInitializeEx should succeed on a fresh thread");
+    }
+
+    #[test]
+    fn int_variant_roundtrips_the_value() {
+        let v = int_variant(42);
+        let read_back = unsafe { (*v.Anonymous.Anonymous).Anonymous.lVal };
+        assert_eq!(read_back, 42);
     }
 }

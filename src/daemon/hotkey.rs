@@ -11,7 +11,7 @@
 //! service the tray icon.
 
 use std::sync::mpsc::Sender;
-use windows::Win32::Foundation::{HMODULE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetForegroundWindow, GetWindowThreadProcessId, SetWindowsHookExW,
     UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN,
@@ -32,7 +32,14 @@ pub fn install(toggle_tx: Sender<()>) -> windows::core::Result<HHOOK> {
         .set(toggle_tx)
         .expect("hotkey::install must only be called once");
 
-    unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), Some(HMODULE::default()), 0) }
+    unsafe {
+        SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(hook_proc),
+            Some(HINSTANCE::default()),
+            0,
+        )
+    }
 }
 
 pub fn uninstall(hook: HHOOK) {
