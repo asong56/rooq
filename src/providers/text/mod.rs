@@ -22,9 +22,9 @@ pub fn read_as_text(path: &Path) -> Result<String, TextProviderError> {
         return Ok(decoded.into_owned());
     }
 
-    let mut detector = chardetng::EncodingDetector::new();
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
     detector.feed(&bytes, true);
-    let encoding = detector.guess(None, true);
+    let encoding = detector.guess(None, chardetng::Utf8Detection::Allow);
     let (decoded, _, had_errors) = encoding.decode(&bytes);
 
     if had_errors && decoded.trim().is_empty() {
