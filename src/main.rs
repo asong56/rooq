@@ -31,6 +31,15 @@ fn native_options(always_on_top: bool) -> eframe::NativeOptions {
     }
     eframe::NativeOptions {
         viewport,
+        // winit's EventLoop refuses to be built off the process's main thread unless told
+        // otherwise. The daemon spawns each preview window on its own background thread
+        // (see spawn_preview_window) so the tray/hotkey message loop can own the main
+        // thread instead — without this hook, EventLoop::new() panics or wedges the
+        // window on Windows, which is what produced the full freeze on open.
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            builder.with_any_thread(true);
+        })),
         ..Default::default()
     }
 }
