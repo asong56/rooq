@@ -1,18 +1,6 @@
-//! Markdown rendering via `egui_commonmark`, a mature crate purpose-built
-//! for CommonMark + GitHub extensions (tables, strikethrough, task lists,
-//! footnotes) in egui.
-//!
-//! Known inconsistency: `egui_commonmark`'s optional code-block highlighting
-//! uses syntect, not the tree-sitter/syntastica engine used elsewhere in
-//! this project. That feature isn't enabled (see Cargo.toml), so it doesn't
-//! currently matter, but it's worth knowing if it's turned on later.
-
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
-/// Holds a `CommonMarkCache` across frames (it caches image handles and
-/// other resources) rather than rebuilding it per frame, which would mean
-/// re-parsing and re-loading everything every frame in this immediate-mode
-/// GUI.
+// Cache kept across frames: this is immediate-mode, so rebuilding it per frame would re-parse everything.
 pub struct MarkdownProvider {
     cache: CommonMarkCache,
 }
@@ -37,9 +25,6 @@ impl MarkdownProvider {
 
 #[cfg(test)]
 mod tests {
-    // Markdown rendering needs a live egui::Ui context, so real rendering
-    // is checked manually by running the app; this just confirms
-    // construction doesn't panic.
     use super::*;
 
     #[test]

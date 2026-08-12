@@ -1,14 +1,4 @@
-//! Global Space-key toggle via a `WH_KEYBOARD_LL` hook. Space is only
-//! treated as a toggle when the foreground window belongs to Explorer, so
-//! an ordinary Space press elsewhere (a text field, a game) passes through
-//! untouched. `RegisterHotKey` was deliberately not used: a hotkey
-//! registered without a modifier key intercepts that key everywhere on the
-//! system, which would break typing Space in every other application.
-//!
-//! `WH_KEYBOARD_LL` requires a message loop running on the thread that
-//! installed it; `install`/`uninstall` only set up and tear down the hook,
-//! the pump itself lives in `daemon::run_message_loop` so it can also
-//! service the tray icon.
+// RegisterHotKey without a modifier grabs that key system-wide, breaking Space in every other app — hence the low-level hook, gated on Explorer being foreground.
 
 use std::sync::mpsc::Sender;
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
@@ -19,14 +9,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const VK_SPACE: u32 = 0x20;
 
-/// Set by `install`, read from the hook procedure. The hook procedure is a
-/// plain `extern "system" fn` (Windows calls it directly; no closure
-/// capture is possible), so the sender has to reach it through a static.
 static TOGGLE_SENDER: std::sync::OnceLock<Sender<()>> = std::sync::OnceLock::new();
 
-/// Installs the hook. Each Space key-down (not key-up — one toggle per
-/// press is what "press once to show, press again to hide" needs) while
-/// Explorer is the foreground window sends `()` on `toggle_tx`.
 pub fn install(toggle_tx: Sender<()>) -> windows::core::Result<HHOOK> {
     TOGGLE_SENDER
         .set(toggle_tx)
@@ -66,10 +50,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-/// Checking the owning process name (rather than matching a window class
-/// like `CabinetWClass`) is more robust across Windows versions and covers
-/// both File Explorer windows and the desktop, which is also owned by
-/// explorer.exe.
+// Process name, not window class: also covers the desktop (explorer.exe) and is more stable across Windows versions.
 fn foreground_window_is_explorer() -> bool {
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.is_invalid() {

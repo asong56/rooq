@@ -13,11 +13,11 @@ I'm looking for" without launching a heavier app.
 - **Text/code**: encoding auto-detected (BOM, then `chardetng`); syntax
   highlighting via tree-sitter (`syntastica`) for common languages
 - **Markdown**: rendered via `egui_commonmark`
-- **Video**: first-frame thumbnail for mkv/webm (via `onas`)
+- **Video**: first-frame thumbnail for mkv/webm (via `ffmpeg`, see below)
 
 ## Building
 
-Requires Rust 1.76+ (egui/egui_commonmark's minimum) and a C/C++ toolchain
+Requires Rust 1.92+ (egui/eframe's minimum) and a C/C++ toolchain
 with libclang for `mupdf-sys` to build MuPDF from source (see
 [mupdf-sys's README](https://github.com/messense/mupdf-rs) for
 platform-specific setup, e.g. MSVC Build Tools + LLVM on Windows).
@@ -59,14 +59,24 @@ untouched.
 
 ### The `onas` companion tool
 
-webp/avif images and mkv/webm video thumbnails are not decoded by Rooq
-directly. Instead Rooq shells out to `onas`, a separate executable, which
-converts the input to a temporary PNG that Rooq then reads through its
-normal PNG path. `onas` is not a Cargo dependency — it's located at
-runtime via, in order: the `ROOQ_ONAS` environment variable, a file next
-to the running `rooq` executable, or `onas` on `PATH`. If it can't be
-found, or the conversion fails or times out, Rooq shows an error in the
-preview area rather than crashing.
+webp/avif images are not decoded by Rooq directly. Instead Rooq shells out
+to `onas`, a separate executable, which converts the input to a temporary
+PNG that Rooq then reads through its normal PNG path. `onas` is not a
+Cargo dependency — it's located at runtime via, in order: the `ROOQ_ONAS`
+environment variable, a file next to the running `rooq` executable, or
+`onas` on `PATH`. If it can't be found, or the conversion fails or times
+out, Rooq shows an error in the preview area rather than crashing.
+
+### The `ffmpeg` companion tool
+
+mkv/webm video thumbnails work the same way, via `ffmpeg` instead: Rooq
+extracts one frame to a temporary PNG and reads it back through the normal
+PNG path. `ffmpeg` isn't bundled or a Cargo dependency either — it's
+located at runtime via, in order: the `ROOQ_FFMPEG` environment variable,
+`ffmpeg` on `PATH` (most installs already have this, via winget/choco/
+scoop), or a file next to the running `rooq` executable. Missing binary,
+failed conversion, or a timeout all surface as an error in the preview
+area rather than a crash.
 
 ## Project layout
 
@@ -82,9 +92,12 @@ src/
 │   ├── request_gen.rs          Generation counter to discard stale preview results on quick switching
 │   └── window.rs               eframe App: owns preview state, wires providers to the UI
 └── providers/
+    ├── subprocess.rs            Shared spawn/timeout/locate-binary plumbing for the two bridges below
+    ├── pixels.rs                Shared RGB->RGBA8 expansion, used by image.rs and pdf.rs
     ├── image.rs                 In-memory jpg/png/gif decoding
     ├── pdf.rs                   First-6-pages rendering + in-memory LRU cache, via mupdf
-    ├── onas_bridge/             Subprocess bridge to `onas` for webp/avif and video thumbnails
+    ├── onas_bridge/             Subprocess bridge to `onas` for webp/avif
+    ├── ffmpeg_bridge/           Subprocess bridge to `ffmpeg` for video thumbnails
     └── text/
         ├── mod.rs               Encoding detection
         ├── highlight.rs         tree-sitter highlighting -> egui LayoutJob
@@ -130,10 +143,9 @@ regardless.
   `IShellWindows` enumerates the same way.
 - **A second Space press may not register as toggle-off if the preview
   window has taken OS focus** away from Explorer, since the hook only
-  treats Space as a toggle when Explorer is the foreground window; see
-  the comment on `run_daemon` in `main.rs`. `with_always_on_top()` avoids
-  deliberately stealing focus, but this hasn't been confirmed against a
-  real Explorer window.
+  treats Space as a toggle when Explorer is the foreground window.
+  `with_always_on_top()` avoids deliberately stealing focus, but this
+  hasn't been confirmed against a real Explorer window.
 
 ## TODO
 
@@ -155,10 +167,8 @@ regardless.
   `IShellView::GetItemObject::<IShellItemArray>`) uses ordinary
   vtable-based COM interfaces, which is more reliably bindable in
   `windows-rs` than the `IDispatch`-only automation path an earlier
-  version of this file used (that version didn't compile — see git
-  history / prior error logs). The one remaining flagged risk is
-  `IShellWindows::Item`'s exact binding; see the caution note at the top
-  of `selection.rs`.
+  version of this file used (that version didn't compile). `IShellWindows::Item`'s
+  exact binding is the one remaining unverified call in that chain.
 - **No "start with Windows" option.** Right now the daemon only runs for
   as long as it's manually launched each session; a real install would
   want a Startup shortcut or registry entry, which doesn't exist yet.

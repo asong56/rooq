@@ -1,11 +1,12 @@
 use crate::core::dispatcher::{self, FileCategory, ImageRoute, InMemoryImageKind, TextKind};
 use crate::core::request_gen::RequestGenerator;
+use crate::providers::ffmpeg_bridge;
 use crate::providers::image as image_provider;
 use crate::providers::onas_bridge;
 use crate::providers::pdf::PdfProvider;
 use crate::providers::text::{self, highlight, markdown::MarkdownProvider};
 use eframe::egui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -38,13 +39,7 @@ struct AnimState {
     last_switch: Instant,
 }
 
-/// Registers a system CJK font as a fallback so Chinese/Japanese/Korean text
-/// doesn't render as tofu boxes: egui's default fonts have no CJK glyphs and
-/// egui has no built-in fallback-to-system-font behavior (upstream issue
-/// #5233). Appended (not prepended) to the fallback chain so Latin glyphs
-/// still come from egui's default fonts. Reads from disk at startup rather
-/// than bundling a font, since a CJK font is several MB and the target
-/// (Windows) almost always has one installed already.
+/// egui has no fallback-to-system-font behavior (upstream issue #5233), so a CJK font is loaded from disk and appended after egui's defaults.
 fn load_cjk_fallback_font(ctx: &egui::Context) {
     const CANDIDATE_PATHS: &[&str] = &[
         r"C:\Windows\Fonts\msyh.ttc",
@@ -82,6 +77,18 @@ fn load_cjk_fallback_font(ctx: &egui::Context) {
     );
 }
 
+fn load_rgba_texture(
+    ctx: &egui::Context,
+    name: impl Into<String>,
+    width: u32,
+    height: u32,
+    rgba8: &[u8],
+) -> egui::TextureHandle {
+    let color_image =
+        egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], rgba8);
+    ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR)
+}
+
 pub struct RooqApp {
     request_gen: RequestGenerator,
     pdf_provider: PdfProvider,
@@ -89,10 +96,6 @@ pub struct RooqApp {
     state: PreviewState,
     current_path: Option<PathBuf>,
     code_theme: syntastica::theme::ResolvedTheme,
-    /// Set from another thread (the daemon's hotkey loop) to ask this
-    /// preview window to close, e.g. on a second Space press. `None` for
-    /// the plain CLI-viewer case where nothing outside the eframe app
-    /// itself needs to close the window.
     close_requested: Option<Arc<AtomicBool>>,
 }
 
@@ -142,8 +145,8 @@ impl RooqApp {
             FileCategory::RequiresOnas(dispatcher::OnasReason::ImageWebpOrAvif) => {
                 self.load_onas_image(ctx, path)
             }
-            FileCategory::RequiresOnas(dispatcher::OnasReason::VideoMkvOrWebm) => {
-                self.load_onas_video_frame(ctx, path)
+            FileCategory::RequiresFfmpeg(dispatcher::FfmpegReason::VideoMkvOrWebm) => {
+                self.load_ffmpeg_video_frame(ctx, path)
             }
             FileCategory::Unsupported => PreviewState::Error("Unrecognized file type".to_string()),
         }
@@ -161,32 +164,35 @@ impl RooqApp {
         }
     }
 
-    /// webp/avif: onas converts to a temporary PNG, which is then decoded by
-    /// the same zune-png path used for local PNGs. `temp_png` is an RAII
-    /// guard that deletes the temp file when dropped.
     fn load_onas_image(&mut self, ctx: &egui::Context, path: &PathBuf) -> PreviewState {
-        let temp_png = match onas_bridge::convert_image_to_png(path) {
-            Ok(guard) => guard,
-            Err(e) => return PreviewState::Error(format!("onas conversion failed: {e}")),
-        };
-
-        match image_provider::decode(temp_png.path(), InMemoryImageKind::Png) {
-            Ok(decoded) => Self::decoded_image_to_preview_state(ctx, decoded),
-            Err(e) => PreviewState::Error(format!("onas succeeded but reading its output failed: {e}")),
-        }
+        Self::load_via_temp_png(ctx, onas_bridge::convert_image_to_png(path), "onas", "conversion")
     }
 
-    /// mkv/webm: onas extracts one frame to a temporary PNG (`onas frame`),
-    /// decoded via the same path as `load_onas_image`.
-    fn load_onas_video_frame(&mut self, ctx: &egui::Context, path: &PathBuf) -> PreviewState {
-        let temp_png = match onas_bridge::extract_video_frame(path) {
+    fn load_ffmpeg_video_frame(&mut self, ctx: &egui::Context, path: &PathBuf) -> PreviewState {
+        Self::load_via_temp_png(
+            ctx,
+            ffmpeg_bridge::extract_video_frame(path),
+            "ffmpeg",
+            "frame extraction",
+        )
+    }
+
+    fn load_via_temp_png(
+        ctx: &egui::Context,
+        result: Result<impl AsRef<Path>, impl std::fmt::Display>,
+        tool: &str,
+        action: &str,
+    ) -> PreviewState {
+        let temp_png = match result {
             Ok(guard) => guard,
-            Err(e) => return PreviewState::Error(format!("onas frame extraction failed: {e}")),
+            Err(e) => return PreviewState::Error(format!("{tool} {action} failed: {e}")),
         };
 
-        match image_provider::decode(temp_png.path(), InMemoryImageKind::Png) {
+        match image_provider::decode(temp_png.as_ref(), InMemoryImageKind::Png) {
             Ok(decoded) => Self::decoded_image_to_preview_state(ctx, decoded),
-            Err(e) => PreviewState::Error(format!("onas succeeded but reading its output failed: {e}")),
+            Err(e) => {
+                PreviewState::Error(format!("{tool} succeeded but reading its output failed: {e}"))
+            }
         }
     }
 
@@ -200,15 +206,8 @@ impl RooqApp {
                 .into_iter()
                 .enumerate()
                 .map(|(i, f)| {
-                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                        [f.width as usize, f.height as usize],
-                        &f.rgba8,
-                    );
-                    let texture = ctx.load_texture(
-                        format!("anim_frame_{i}"),
-                        color_image,
-                        egui::TextureOptions::LINEAR,
-                    );
+                    let texture =
+                        load_rgba_texture(ctx, format!("anim_frame_{i}"), f.width, f.height, &f.rgba8);
                     (texture, f.delay.unwrap_or(std::time::Duration::from_millis(100)))
                 })
                 .collect::<Vec<_>>();
@@ -223,11 +222,7 @@ impl RooqApp {
             }
         } else {
             let f = &decoded.frames[0];
-            let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                [f.width as usize, f.height as usize],
-                &f.rgba8,
-            );
-            let texture = ctx.load_texture("static_image", color_image, egui::TextureOptions::LINEAR);
+            let texture = load_rgba_texture(ctx, "static_image", f.width, f.height, &f.rgba8);
             PreviewState::Image {
                 texture,
                 anim: None,
@@ -242,15 +237,7 @@ impl RooqApp {
                     .iter()
                     .enumerate()
                     .map(|(i, p)| {
-                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                            [p.width as usize, p.height as usize],
-                            &p.rgba8,
-                        );
-                        ctx.load_texture(
-                            format!("pdf_page_{i}"),
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        )
+                        load_rgba_texture(ctx, format!("pdf_page_{i}"), p.width, p.height, &p.rgba8)
                     })
                     .collect();
                 PreviewState::Pdf {
@@ -315,17 +302,24 @@ impl eframe::App for RooqApp {
             ctx.request_repaint_after(current_delay.saturating_sub(elapsed));
         }
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.draw_preview(ui);
         });
 
-        // Poll for the close signal even when nothing else triggers a
-        // repaint, so a second Space press closes the window promptly
-        // rather than waiting for unrelated input to wake the UI thread.
         if self.close_requested.is_some() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
+}
+
+fn scale_to_fit(natural: egui::Vec2, max: egui::Vec2) -> f32 {
+    (max.x / natural.x).min(max.y / natural.y).min(1.0)
+}
+
+fn draw_scaled_image(ui: &mut egui::Ui, texture: &egui::TextureHandle, max: egui::Vec2) {
+    let natural = texture.size_vec2();
+    let scale = scale_to_fit(natural, max);
+    ui.image((texture.id(), natural * scale));
 }
 
 impl RooqApp {
@@ -348,11 +342,7 @@ impl RooqApp {
                         None => &*texture,
                     };
                     let available = ui.available_size();
-                    let img_size = display_texture.size_vec2();
-                    let scale = (available.x / img_size.x)
-                        .min(available.y / img_size.y)
-                        .min(1.0);
-                    ui.image((display_texture.id(), img_size * scale));
+                    draw_scaled_image(ui, display_texture, available);
                 });
             }
             PreviewState::Pdf {
@@ -377,18 +367,14 @@ impl RooqApp {
                     });
                     egui::ScrollArea::both().show(ui, |ui| {
                         if let Some(texture) = page_textures.get(*current_page) {
-                            let available_width = ui.available_width();
-                            let img_size = texture.size_vec2();
-                            let scale = (available_width / img_size.x).min(1.0);
-                            ui.image((texture.id(), img_size * scale));
+                            let max = egui::vec2(ui.available_width(), f32::INFINITY);
+                            draw_scaled_image(ui, texture, max);
                         }
                     });
                 });
             }
             PreviewState::PlainText { content } => {
-                // Read-only Label, not TextEdit: TextEdit requires a &mut
-                // String even when non-interactive, which invites cloning
-                // the whole buffer every frame.
+                // Label, not TextEdit: TextEdit needs a &mut String even read-only, cloning the whole buffer every frame.
                 egui::ScrollArea::both().show(ui, |ui| {
                     ui.add(
                         egui::Label::new(

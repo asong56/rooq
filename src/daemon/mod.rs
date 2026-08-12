@@ -1,6 +1,3 @@
-//! Background daemon: tray icon + Space-key watcher, both driven by one
-//! Win32 message loop on a dedicated thread (see `main.rs::run_daemon`).
-
 pub mod hotkey;
 pub mod selection;
 
@@ -12,15 +9,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
 };
 
-/// Installs the tray icon and the keyboard hook, then pumps messages for
-/// both until the tray's "Exit" item is clicked. Each Space press detected
-/// by the hook (see `hotkey.rs`) is forwarded on `toggle_tx`.
 pub fn run_message_loop(toggle_tx: Sender<()>) -> windows::core::Result<()> {
     let (_tray_icon, exit_id) = build_tray_icon();
 
-    // WH_KEYBOARD_LL is set up here (same thread, same message loop) rather
-    // than in a `hotkey::run` that owns its own `GetMessage` loop, so one
-    // loop below can service both the hook and the tray icon.
     let hook = hotkey::install(toggle_tx)?;
 
     let mut msg = MSG::default();
@@ -81,9 +72,6 @@ fn build_tray_icon() -> (Option<tray_icon::TrayIcon>, Option<MenuId>) {
     (tray, Some(exit_id))
 }
 
-/// A plain 16x16 filled square rather than a bundled .ico: this is a
-/// placeholder good enough to make the tray icon visible and clickable.
-/// Swap in a real icon asset if/when one exists.
 fn tray_icon_image() -> Result<Icon, tray_icon::BadIcon> {
     const SIZE: u32 = 16;
     let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);

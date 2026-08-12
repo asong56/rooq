@@ -3,25 +3,14 @@ name = "rooq"
 version = "0.1.0"
 edition = "2021"
 authors = ["asong56"]
-# egui/epaint require rustc 1.76+.
-rust-version = "1.76"
+rust-version = "1.92"
 
 [[bin]]
 name = "rooq"
 path = "src/main.rs"
 
 [dependencies]
-# ---- Daemon: global hotkey + Explorer selection ----
-# Official Microsoft bindings; used for the low-level keyboard hook
-# (WH_KEYBOARD_LL, needed to detect a Space key-down without registering it
-# as a system-wide hotkey — RegisterHotKey would swallow every Space press
-# everywhere, including normal typing) and the Shell.Application COM
-# automation used to read the selected file from the foreground Explorer
-# window. Feature list kept to exactly the interfaces used:
-# WindowsAndMessaging for the hook, Shell + Com for the selection query,
-# Threading + ProcessStatus for identifying the foreground process as
-# explorer.exe.
-windows = { version = "0.62", features = [
+windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
@@ -32,87 +21,33 @@ windows = { version = "0.62", features = [
     "Win32_System_ProcessStatus",
 ] }
 
-# ---- Daemon: tray icon ----
-# tray-icon (tauri-apps): Windows-native Shell_NotifyIconW wrapper. Needs a
-# Win32 message loop pumping on the same thread it's created on — reuses
-# the message loop already required for the WH_KEYBOARD_LL hook above,
-# rather than pulling in winit just to host a tray icon.
-tray-icon = "0.19"
+tray-icon = "0.24.2"
 
-# ---- GUI ----
-# eframe's default features pull in wgpu (multi-backend DX12/Vulkan/Metal),
-# which is unnecessary weight for just blitting bitmaps to screen. glow
-# (OpenGL) is enough, so defaults are disabled and only glow is kept.
-# wayland/x11 (winit's Linux backends) are dropped since the target is
-# Windows-only.
-eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow"] }
-egui = "0.34"
-# egui_extras is intentionally not a dependency: image/PDF display goes
-# through decode-to-RGBA8 -> ctx.load_texture() -> ui.image(), which is
-# base egui functionality. Pulling in egui_extras' "image" feature would
-# re-introduce the generic `image` crate as a dependency for jpg/png,
-# undoing the point of using zune below.
+# wgpu (eframe's default) is unneeded weight for blitting bitmaps; glow covers it.
+eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.35.0"
 
-# ---- Images (in-memory: jpg/png/gif) ----
-# jpg/png use zune-jpeg/zune-png (SIMD, smaller dependency tree than the
-# `image` crate's general decoders). gif stays on `image` (only the gif
-# decoder enabled) since zune has no mature animated-gif support.
-# webp/avif and video thumbnails aren't decoded here; see
-# providers/onas_bridge and core/window.rs's load_onas_image /
-# load_onas_video_frame.
-zune-core = "0.5"
-zune-jpeg = "0.5"
-zune-png = "0.5"
-image = { version = "0.25", default-features = false, features = ["gif"] }
+zune-core = "0.5.1"
+zune-jpeg = "0.5.15"
+zune-png = "0.4.10"
+image = { version = "0.25.10", default-features = false, features = ["gif"] }
 
-# ---- File type detection ----
-infer = "0.16"
+infer = "0.22.0"
 
-# ---- PDF ----
-# mupdf: AGPL-3.0 (or Artifex commercial license as an alternative).
-# mupdf-sys compiles and statically links MuPDF at build time; no separate
-# dynamic library needs to be shipped.
-#
-# Default features are trimmed heavily: the mupdf crate's defaults include
-# a JS engine, XPS, CBZ, HTML/EPUB rendering, Tesseract OCR, and DOCX
-# export — none of which this project needs, and mupdf-sys's build.rs
-# compiles them out of the underlying C library (not just skips linking a
-# crate). Kept:
-# - base14-fonts: the 14 standard PDF fonts; most real PDFs assume these
-#   are available without embedding them.
-# - system-fonts: lets MuPDF query installed system fonts when a PDF
-#   references one it doesn't embed (common for CJK PDFs referencing fonts
-#   like "Microsoft YaHei"). Same trade-off as the CJK font fallback in
-#   core/window.rs: borrow the system font at runtime instead of bundling one.
-#
-# Disabling "img" is believed to only affect opening a standalone image file
-# as a MuPDF document, not images embedded in PDF content streams (handled
-# by lower-level jpeg/jbig2/openjpeg decoders) — this is inferred from
-# feature semantics, not verified by testing; worth confirming with a
-# real image-heavy PDF if problems show up.
-mupdf = { version = "0.8", default-features = false, features = ["base14-fonts", "system-fonts"] }
+# mupdf is AGPL-3.0 (or a paid Artifex license); distributing this binary
+# without the latter means the whole project must ship under AGPL-3.0.
+mupdf = { version = "0.8.0", default-features = false, features = ["base14-fonts", "system-fonts"] }
 
-# ---- Text viewer: encoding detection ----
-chardetng = "0.1"
-encoding_rs = "0.8"
+chardetng = "1.0.0"
+encoding_rs = "0.8.35"
 
-# ---- Text viewer: tree-sitter highlighting (syntastica) ----
-# syntastica-parsers (not -git/-gitdep): pure crates.io dependency, no git
-# fetch needed at build time. Trade-off: narrower language coverage than
-# the -git collection, but the "some" feature covers common languages.
-syntastica = "0.6"
-syntastica-parsers = { version = "0.6", features = ["some"] }
-syntastica-themes = "0.6"
+syntastica = "0.6.1"
+syntastica-parsers = { version = "0.6.1", features = ["some"] }
+syntastica-themes = "0.6.1"
 
-# ---- Markdown ----
-# `better_syntax_highlighting` is not enabled: it uses syntect internally,
-# which would reintroduce the highlighting engine this project otherwise
-# avoids, just for markdown's embedded code blocks. Trade-off: fenced code
-# blocks in markdown render as plain monospace text, no syntax color.
-egui_commonmark = "0.23"
+egui_commonmark = "0.23.0"
 
-# ---- Misc ----
-thiserror = "1"
+thiserror = "2.0.19"
 
 [profile.release]
 opt-level = 3

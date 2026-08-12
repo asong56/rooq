@@ -1,12 +1,4 @@
-//! In-memory image decoding for jpg/png/gif.
-//!
-//! jpg/png use zune-jpeg/zune-png (SIMD, smaller dependency tree than the
-//! `image` crate's decoders). gif uses the `image` crate, since zune has no
-//! mature animated-gif support.
-//!
-//! webp/avif and video thumbnails aren't handled here; they go through
-//! onas_bridge, which converts to a temporary PNG and hands it back to the
-//! PNG path below.
+// gif goes through the `image` crate, not zune-jpeg/zune-png, since zune has no animated-gif support.
 
 use crate::core::dispatcher::InMemoryImageKind;
 use image::{AnimationDecoder, ImageError};
@@ -38,9 +30,6 @@ pub enum ImageProviderError {
     UnsupportedBitDepth,
 }
 
-/// One decoded frame, dimensions plus packed RGBA8 pixels. Every decoder
-/// normalizes to RGBA8 so the UI layer doesn't need to care about source
-/// format or color space.
 pub struct DecodedFrame {
     pub width: u32,
     pub height: u32,
@@ -92,9 +81,7 @@ fn decode_jpeg(path: &Path) -> Result<DecodedImage, ImageProviderError> {
 fn decode_png(path: &Path) -> Result<DecodedImage, ImageProviderError> {
     let bytes = std::fs::read(path)?;
 
-    // zune-png's own `png_set_add_alpha_channel` only converts Luma to
-    // LumaA, not RGBA, so alpha is expanded manually below to guarantee
-    // RGBA8 regardless of source color space.
+    // zune-png's alpha-add option only reaches LumaA, not RGBA, hence the manual expansion below.
     let mut decoder = PngDecoder::new(ZCursor::new(&bytes));
     let result = decoder
         .decode()
@@ -147,14 +134,7 @@ fn expand_to_rgba8(
             }
             Ok(out)
         }
-        3 => {
-            let mut out = Vec::with_capacity(samples.len() / 3 * 4);
-            for chunk in samples.chunks_exact(3) {
-                out.extend_from_slice(chunk);
-                out.push(255);
-            }
-            Ok(out)
-        }
+        3 => Ok(crate::providers::pixels::rgb_to_rgba(samples)),
         4 => Ok(samples.to_vec()),
         _ => Err(ImageProviderError::PngDecode(format!(
             "unexpected component count: {n}"

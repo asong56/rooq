@@ -1,9 +1,4 @@
-//! Generation counter used to discard stale preview results.
-//!
-//! When the user switches preview targets quickly, a decode from the
-//! previous file may finish after a newer request was already issued.
-//! Each switch bumps the generation; a result is only applied if its
-//! generation still matches current.
+// Discards a decode result that finishes after a newer preview request was already issued (fast switching between files).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -34,7 +29,6 @@ impl RequestGenerator {
 }
 
 impl RequestToken {
-    /// False means a decode result should be discarded rather than applied.
     pub fn is_still_current(&self) -> bool {
         self.current.load(Ordering::SeqCst) == self.generation_at_dispatch
     }

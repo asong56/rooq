@@ -1,5 +1,4 @@
-//! File type detection and routing. Trusts magic bytes over extension
-//! (users rename files often); extension is only a fallback.
+// Magic bytes are trusted over extension: users rename files often.
 
 use std::path::Path;
 
@@ -8,15 +7,13 @@ pub enum FileCategory {
     Image(ImageRoute),
     Pdf,
     Text(TextKind),
-    /// webp/avif images and mkv/webm video thumbnails, both handled via the
-    /// onas subprocess.
     RequiresOnas(OnasReason),
+    RequiresFfmpeg(FfmpegReason),
     Unsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageRoute {
-    /// jpg/png/gif: decoded in-process, no subprocess needed.
     InMemory(InMemoryImageKind),
 }
 
@@ -30,6 +27,10 @@ pub enum InMemoryImageKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnasReason {
     ImageWebpOrAvif,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfmpegReason {
     VideoMkvOrWebm,
 }
 
@@ -48,8 +49,6 @@ pub fn detect(path: &Path) -> FileCategory {
         }
     }
 
-    // Plain text has no magic bytes, so anything unsniffed falls back to
-    // extension.
     category_from_extension(path)
 }
 
@@ -67,7 +66,7 @@ fn category_from_mime(mime: &str) -> Option<FileCategory> {
         "image/webp" | "image/avif" => Some(FileCategory::RequiresOnas(OnasReason::ImageWebpOrAvif)),
         "application/pdf" => Some(FileCategory::Pdf),
         "video/x-matroska" | "video/webm" => {
-            Some(FileCategory::RequiresOnas(OnasReason::VideoMkvOrWebm))
+            Some(FileCategory::RequiresFfmpeg(FfmpegReason::VideoMkvOrWebm))
         }
         _ => None,
     }
@@ -88,11 +87,9 @@ fn category_from_extension(path: &Path) -> FileCategory {
         "png" => FileCategory::Image(ImageRoute::InMemory(InMemoryImageKind::Png)),
         "gif" => FileCategory::Image(ImageRoute::InMemory(InMemoryImageKind::Gif)),
         "webp" | "avif" => FileCategory::RequiresOnas(OnasReason::ImageWebpOrAvif),
-        "mkv" | "webm" => FileCategory::RequiresOnas(OnasReason::VideoMkvOrWebm),
+        "mkv" | "webm" => FileCategory::RequiresFfmpeg(FfmpegReason::VideoMkvOrWebm),
         "pdf" => FileCategory::Pdf,
         "md" | "markdown" => FileCategory::Text(TextKind::Markdown),
-        // Language identification lives in highlight.rs, not here, so adding
-        // a language doesn't require touching the dispatcher.
         _ => FileCategory::Text(TextKind::PlainOrCode),
     }
 }
@@ -145,6 +142,17 @@ mod tests {
         assert_eq!(
             cat,
             FileCategory::RequiresOnas(OnasReason::ImageWebpOrAvif)
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn mkv_routes_to_ffmpeg() {
+        let path = write_temp("ql_test.mkv", b"not real mkv bytes but ext matches");
+        let cat = detect(&path);
+        assert_eq!(
+            cat,
+            FileCategory::RequiresFfmpeg(FfmpegReason::VideoMkvOrWebm)
         );
         std::fs::remove_file(path).ok();
     }

@@ -5,8 +5,8 @@ pub use crate::providers::subprocess::{SubprocessError, TempFile};
 use crate::providers::subprocess::temp_output_path;
 use std::path::Path;
 
-pub fn convert_image_to_png(input: &Path) -> Result<TempFile, SubprocessError> {
-    let output = temp_output_path("onas", "png");
-    subprocess::run_onas_image_convert(input, &output)?;
+pub fn extract_video_frame(input: &Path) -> Result<TempFile, SubprocessError> {
+    let output = temp_output_path("ffmpeg", "png");
+    subprocess::run_ffmpeg_frame_extract(input, &output)?;
     Ok(TempFile::new(output))
 }

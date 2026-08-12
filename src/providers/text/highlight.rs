@@ -1,11 +1,4 @@
-//! Syntax highlighting via tree-sitter (syntastica), chosen over
-//! regex-based engines (e.g. syntect) for accurate, real-parse highlighting
-//! in line with what editors like Neovim/Helix/Zed use.
-//!
-//! syntastica's `ThemedHighlights<'src>` (`Vec<Vec<(&str, Option<Style>)>>`,
-//! lines of styled spans) maps directly onto egui's `LayoutJob` model, so
-//! this builds the job manually via `resolve_styles` rather than using
-//! syntastica's Terminal/Html renderers.
+// tree-sitter (syntastica) over regex engines: real parsing, same approach editors like Neovim/Helix/Zed use.
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId};
@@ -14,10 +7,6 @@ use syntastica::style::Style as SynStyle;
 use syntastica::{Processor, ThemedHighlights};
 use syntastica_parsers::{Lang, LanguageSetImpl};
 
-/// Language detection lives here rather than in the dispatcher, which only
-/// needs to know "text vs code" — adding a language means editing this map
-/// only. Coverage matches syntastica-parsers' "some" feature set (see
-/// Cargo.toml); switching to "most"/"all" there would let this list grow.
 pub fn detect_language(path: &std::path::Path) -> Option<Lang> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
@@ -36,15 +25,10 @@ pub fn detect_language(path: &std::path::Path) -> Option<Lang> {
         "html" | "htm" => Lang::Html,
         "css" => Lang::Css,
         "lua" => Lang::Lua,
-        // toml/xml/sql/ruby/php aren't in syntastica-parsers' "some" feature
-        // set; switching to "most" in Cargo.toml would add them back.
-        // Unrecognized extensions fall back to plain text, not an error.
         _ => return None,
     })
 }
 
-/// Owned rather than borrowed spans, since results may cross thread
-/// boundaries (background parse -> UI thread render).
 pub struct HighlightedLine {
     pub spans: Vec<(String, Option<SpanStyle>)>,
 }
@@ -71,7 +55,6 @@ impl From<SynStyle> for SpanStyle {
     }
 }
 
-/// Highlights an entire source file and returns per-line spans.
 pub fn highlight_source(
     source: &str,
     lang: Lang,

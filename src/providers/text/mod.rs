@@ -1,7 +1,3 @@
-//! Text/code viewer. `highlight.rs` does tree-sitter/syntastica
-//! highlighting; `markdown.rs` wraps egui_commonmark; this file handles
-//! encoding detection.
-
 pub mod highlight;
 pub mod markdown;
 
@@ -17,11 +13,7 @@ pub enum TextProviderError {
     NotText,
 }
 
-/// Reads a file and decodes it to a UTF-8 `String`.
-///
-/// Detection order: BOM first (explicit, more reliable than statistical
-/// guessing), then `chardetng` heuristics for BOM-less encodings like GBK.
-/// If even that fails, falls back to lossy UTF-8 (garbled beats unreadable).
+// BOM checked first (explicit), then chardetng heuristics for BOM-less encodings like GBK.
 pub fn read_as_text(path: &Path) -> Result<String, TextProviderError> {
     let bytes = std::fs::read(path)?;
 
@@ -35,8 +27,6 @@ pub fn read_as_text(path: &Path) -> Result<String, TextProviderError> {
     let encoding = detector.guess(None, true);
     let (decoded, _, had_errors) = encoding.decode(&bytes);
 
-    // The dispatcher already routes known binary formats elsewhere, so this
-    // is mostly a defensive fallback for misdetected files.
     if had_errors && decoded.trim().is_empty() {
         return Err(TextProviderError::NotText);
     }
@@ -52,7 +42,7 @@ mod tests {
     fn reads_utf8_bom_file() {
         let mut path = std::env::temp_dir();
         path.push("ql_test_bom.txt");
-        let mut bytes = vec![0xEF, 0xBB, 0xBF]; // UTF-8 BOM
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
         bytes.extend_from_slice("hello world".as_bytes());
         std::fs::write(&path, &bytes).unwrap();
 
