@@ -25,6 +25,9 @@ tray-icon = "0.24.2"
 
 eframe = { version = "0.33.0", default-features = false, features = ["default_fonts", "glow"] }
 egui = "0.33.0"
+# Only used for EventLoopBuilderExtWindows::with_any_thread — must match the winit
+# line eframe 0.33 depends on internally, or the EventLoopBuilder types won't unify.
+winit = "0.30.13"
 
 zune-core = "0.5.1"
 zune-jpeg = "0.5.15"
