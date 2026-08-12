@@ -279,11 +279,10 @@ impl RooqApp {
 }
 
 impl eframe::App for RooqApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(flag) = &self.close_requested {
             if flag.load(Ordering::SeqCst) {
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Close);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
             }
         }
@@ -298,16 +297,15 @@ impl eframe::App for RooqApp {
                 anim.current_frame = (anim.current_frame + 1) % anim.frames.len();
                 anim.last_switch = Instant::now();
             }
-            let ctx = ui.ctx().clone();
             ctx.request_repaint_after(current_delay.saturating_sub(elapsed));
         }
 
-        egui::CentralPanel::default().show(ui, |ui| {
+        egui::CentralPanel::default().show(ctx, |ui| {
             self.draw_preview(ui);
         });
 
         if self.close_requested.is_some() {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
 }
