@@ -23,19 +23,16 @@ windows = { version = "0.62.2", features = [
 
 tray-icon = "0.24.2"
 
-# wgpu (eframe's default) is unneeded weight for blitting bitmaps; glow covers it.
-eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow"] }
-egui = "0.35.0"
+eframe = { version = "0.33.0", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.33.0"
 
 zune-core = "0.5.1"
 zune-jpeg = "0.5.15"
-zune-png = "0.4.10"
+zune-png = "0.5.2"
 image = { version = "0.25.10", default-features = false, features = ["gif"] }
 
 infer = "0.22.0"
 
-# mupdf is AGPL-3.0 (or a paid Artifex license); distributing this binary
-# without the latter means the whole project must ship under AGPL-3.0.
 mupdf = { version = "0.8.0", default-features = false, features = ["base14-fonts", "system-fonts"] }
 
 chardetng = "1.0.0"
@@ -45,7 +42,7 @@ syntastica = "0.6.1"
 syntastica-parsers = { version = "0.6.1", features = ["some"] }
 syntastica-themes = "0.6.1"
 
-egui_commonmark = "0.23.0"
+egui_commonmark = "0.22.0"
 
 thiserror = "2.0.19"
 
