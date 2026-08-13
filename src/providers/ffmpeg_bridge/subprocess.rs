@@ -3,7 +3,9 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-// window.rs calls this synchronously, so a hang (heavy codec init) would block the UI thread without this deadline.
+// Still bounded even though window.rs now calls this from a background
+// thread (not the UI thread): a stuck subprocess would otherwise hang that
+// thread indefinitely and the request would never resolve.
 const FRAME_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 const EXE_NAME: &str = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
