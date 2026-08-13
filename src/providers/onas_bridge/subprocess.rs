@@ -3,7 +3,9 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-// window.rs calls this synchronously; a hung onas process would block the UI thread indefinitely without this circuit breaker.
+// Still bounded even though window.rs now calls this from a background
+// thread (not the UI thread): a hung onas process would otherwise block
+// that thread indefinitely and the request would never resolve.
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 const EXE_NAME: &str = if cfg!(windows) { "onas.exe" } else { "onas" };
