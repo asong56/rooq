@@ -1,5 +1,3 @@
-// mupdf is AGPL-3.0 (or a paid Artifex license); see Cargo.toml.
-
 use mupdf::{Colorspace, Document, Matrix};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -99,6 +97,19 @@ impl PdfProvider {
         }
     }
 
+    /// Cache-only lookup: never renders. Safe to call from the UI thread
+    /// unconditionally — a miss returns None immediately instead of
+    /// blocking on mupdf.
+    pub fn cached_pages(&mut self, path: &Path) -> Option<&[DecodedPage]> {
+        let key = CacheKey::from_path(path).ok()?;
+        if self.cache.entries.contains_key(&key) {
+            self.cache.touch(&key);
+            self.cache.entries.get(&key).map(Vec::as_slice)
+        } else {
+            None
+        }
+    }
+
     pub fn get_or_render_first_pages(
         &mut self,
         path: &Path,
@@ -116,7 +127,17 @@ impl PdfProvider {
         Ok(self.cache.entries.get(&key).unwrap())
     }
 
-    fn render_first_pages(path: &Path) -> Result<Vec<DecodedPage>, PdfProviderError> {
+    /// Records a render that already happened elsewhere (the background
+    /// loader thread calls `render_first_pages` directly, off the UI
+    /// thread, since rendering blocks on file + CPU work). Call this on
+    /// receipt so later opens of the same PDF still hit the cache.
+    pub fn record_external_render(&mut self, path: &Path, pages: Vec<DecodedPage>) {
+        if let Ok(key) = CacheKey::from_path(path) {
+            self.cache.insert(key, pages);
+        }
+    }
+
+    pub(crate) fn render_first_pages(path: &Path) -> Result<Vec<DecodedPage>, PdfProviderError> {
         let path_str = path
             .to_str()
             .ok_or_else(|| PdfProviderError::OpenFailed("path contains non-UTF-8 characters".into()))?;
