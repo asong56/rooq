@@ -1,18 +1,20 @@
 use crate::core::dispatcher::{self, FileCategory, ImageRoute, InMemoryImageKind, TextKind};
-use crate::core::request_gen::RequestGenerator;
+use crate::core::request_gen::{RequestGenerator, RequestToken};
 use crate::providers::ffmpeg_bridge;
 use crate::providers::image as image_provider;
 use crate::providers::onas_bridge;
-use crate::providers::pdf::PdfProvider;
+use crate::providers::pdf::{DecodedPage, PdfProvider, PdfProviderError};
 use crate::providers::text::{self, highlight, markdown::MarkdownProvider};
 use eframe::egui;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Instant;
 
 enum PreviewState {
     Empty,
+    Loading,
     Error(String),
     Image {
         texture: egui::TextureHandle,
@@ -37,6 +39,23 @@ struct AnimState {
     frames: Vec<(egui::TextureHandle, std::time::Duration)>,
     current_frame: usize,
     last_switch: Instant,
+}
+
+/// Raw decode/read output produced on a background thread. No GPU textures
+/// are built here — that must happen on the UI thread that owns the paint
+/// context — so this is the payload that crosses the channel back to
+/// `update()`. Carries the source path alongside PDF pages so the result
+/// can be recorded into `PdfProvider`'s cache on receipt.
+enum LoadResult {
+    Image(image_provider::DecodedImage),
+    Pdf(PathBuf, Vec<DecodedPage>),
+    PlainText(String),
+    CodeText {
+        content: String,
+        lines: Vec<highlight::HighlightedLine>,
+    },
+    Markdown(String),
+    Error(String),
 }
 
 /// egui has no fallback-to-system-font behavior (upstream issue #5233), so a CJK font is loaded from disk and appended after egui's defaults.
@@ -95,8 +114,9 @@ pub struct RooqApp {
     markdown_provider: MarkdownProvider,
     state: PreviewState,
     current_path: Option<PathBuf>,
-    code_theme: syntastica::theme::ResolvedTheme,
+    code_theme: Arc<syntastica::theme::ResolvedTheme>,
     close_requested: Option<Arc<AtomicBool>>,
+    pending: Option<Receiver<(RequestToken, LoadResult)>>,
 }
 
 impl RooqApp {
@@ -110,67 +130,112 @@ impl RooqApp {
     ) -> Self {
         load_cjk_fallback_font(&cc.egui_ctx);
 
-        let pdf_provider = PdfProvider::new();
-
         Self {
             request_gen: RequestGenerator::new(),
-            pdf_provider,
+            pdf_provider: PdfProvider::new(),
             markdown_provider: MarkdownProvider::new(),
             state: PreviewState::Empty,
             current_path: None,
-            code_theme: syntastica_themes::one::dark(),
+            code_theme: Arc::new(syntastica_themes::one::dark()),
             close_requested,
+            pending: None,
         }
     }
 
+    /// Kicks off loading on a background thread and returns immediately —
+    /// the result is picked up by `poll_pending` during the normal eframe
+    /// update loop. File I/O, subprocess calls (ffmpeg/onas), and PDF
+    /// rendering used to run synchronously on the UI thread here, freezing
+    /// the window for as long as they took (up to the ffmpeg/onas
+    /// timeouts, or however long mupdf took on a large PDF). Only cheap
+    /// GPU texture upload now happens on the UI thread, in
+    /// `apply_load_result`.
     pub fn open_path(&mut self, ctx: &egui::Context, path: PathBuf) {
-        let _token = self.request_gen.advance();
+        // Fast path: an already-cached PDF render can be applied
+        // immediately without a round trip through a background thread.
+        // cached_pages() never renders, so this never blocks — a cache miss
+        // falls through to the normal async path below.
+        if matches!(dispatcher::detect(&path), FileCategory::Pdf) {
+            if let Some(pages) = self.pdf_provider.cached_pages(&path) {
+                let _token = self.request_gen.advance();
+                self.state = Self::pdf_pages_to_preview_state(ctx, pages);
+                self.current_path = Some(path);
+                self.pending = None;
+                return;
+            }
+        }
 
-        let category = dispatcher::detect(&path);
-        self.state = self.load_for_category(ctx, &path, category);
-        self.current_path = Some(path);
+        let token = self.request_gen.advance();
+        self.current_path = Some(path.clone());
+        self.state = PreviewState::Loading;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.pending = Some(rx);
+
+        let ctx = ctx.clone();
+        let code_theme = Arc::clone(&self.code_theme);
+        std::thread::spawn(move || {
+            let result = Self::load_for_category(&path, &code_theme);
+            // Wake the UI thread even if it's idle — otherwise the result
+            // sits in the channel until the next unrelated repaint.
+            let _ = tx.send((token, result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Drains at most one finished background load per frame and applies it
+    /// (building GPU textures, which must happen on this thread) if it's
+    /// still the most recent request. Stale results — from a file the user
+    /// already navigated away from — are silently dropped.
+    fn poll_pending(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.pending else { return };
+        let Ok((token, result)) = rx.try_recv() else {
+            return;
+        };
+        self.pending = None;
+
+        if !token.is_still_current() {
+            return;
+        }
+
+        self.state = self.apply_load_result(ctx, result);
     }
 
     fn load_for_category(
-        &mut self,
-        ctx: &egui::Context,
         path: &PathBuf,
-        category: FileCategory,
-    ) -> PreviewState {
+        code_theme: &syntastica::theme::ResolvedTheme,
+    ) -> LoadResult {
+        let category = dispatcher::detect(path);
         match category {
-            FileCategory::Image(ImageRoute::InMemory(kind)) => self.load_image(ctx, path, kind),
-            FileCategory::Pdf => self.load_pdf(ctx, path),
-            FileCategory::Text(TextKind::Markdown) => self.load_markdown(path),
-            FileCategory::Text(TextKind::PlainOrCode) => self.load_text(path),
+            FileCategory::Image(ImageRoute::InMemory(kind)) => Self::load_image(path, kind),
+            FileCategory::Pdf => Self::load_pdf(path),
+            FileCategory::Text(TextKind::Markdown) => Self::load_markdown(path),
+            FileCategory::Text(TextKind::PlainOrCode) => Self::load_text(path, code_theme),
             FileCategory::RequiresOnas(dispatcher::OnasReason::ImageWebpOrAvif) => {
-                self.load_onas_image(ctx, path)
+                Self::load_onas_image(path)
             }
             FileCategory::RequiresFfmpeg(dispatcher::FfmpegReason::VideoMkvOrWebm) => {
-                self.load_ffmpeg_video_frame(ctx, path)
+                Self::load_ffmpeg_video_frame(path)
             }
-            FileCategory::Unsupported => PreviewState::Error("Unrecognized file type".to_string()),
+            FileCategory::Unsupported => {
+                LoadResult::Error("Unrecognized file type".to_string())
+            }
         }
     }
 
-    fn load_image(
-        &mut self,
-        ctx: &egui::Context,
-        path: &PathBuf,
-        kind: InMemoryImageKind,
-    ) -> PreviewState {
+    fn load_image(path: &PathBuf, kind: InMemoryImageKind) -> LoadResult {
         match image_provider::decode(path, kind) {
-            Ok(decoded) => Self::decoded_image_to_preview_state(ctx, decoded),
-            Err(e) => PreviewState::Error(format!("Image decode failed: {e}")),
+            Ok(decoded) => LoadResult::Image(decoded),
+            Err(e) => LoadResult::Error(format!("Image decode failed: {e}")),
         }
     }
 
-    fn load_onas_image(&mut self, ctx: &egui::Context, path: &PathBuf) -> PreviewState {
-        Self::load_via_temp_png(ctx, onas_bridge::convert_image_to_png(path), "onas", "conversion")
+    fn load_onas_image(path: &PathBuf) -> LoadResult {
+        Self::load_via_temp_png(onas_bridge::convert_image_to_png(path), "onas", "conversion")
     }
 
-    fn load_ffmpeg_video_frame(&mut self, ctx: &egui::Context, path: &PathBuf) -> PreviewState {
+    fn load_ffmpeg_video_frame(path: &PathBuf) -> LoadResult {
         Self::load_via_temp_png(
-            ctx,
             ffmpeg_bridge::extract_video_frame(path),
             "ffmpeg",
             "frame extraction",
@@ -178,21 +243,86 @@ impl RooqApp {
     }
 
     fn load_via_temp_png(
-        ctx: &egui::Context,
-        result: Result<impl AsRef<Path>, impl std::fmt::Display>,
+        result: Result<impl AsRef<std::path::Path>, impl std::fmt::Display>,
         tool: &str,
         action: &str,
-    ) -> PreviewState {
+    ) -> LoadResult {
         let temp_png = match result {
             Ok(guard) => guard,
-            Err(e) => return PreviewState::Error(format!("{tool} {action} failed: {e}")),
+            Err(e) => return LoadResult::Error(format!("{tool} {action} failed: {e}")),
         };
 
         match image_provider::decode(temp_png.as_ref(), InMemoryImageKind::Png) {
-            Ok(decoded) => Self::decoded_image_to_preview_state(ctx, decoded),
+            Ok(decoded) => LoadResult::Image(decoded),
             Err(e) => {
-                PreviewState::Error(format!("{tool} succeeded but reading its output failed: {e}"))
+                LoadResult::Error(format!("{tool} succeeded but reading its output failed: {e}"))
             }
+        }
+    }
+
+    fn load_pdf(path: &PathBuf) -> LoadResult {
+        match PdfProvider::render_first_pages(path) {
+            Ok(pages) => LoadResult::Pdf(path.clone(), pages),
+            Err(PdfProviderError::OpenFailed(e)) => {
+                LoadResult::Error(format!("PDF render failed: {e}"))
+            }
+            Err(PdfProviderError::RenderFailed(e)) => {
+                LoadResult::Error(format!("PDF render failed: {e}"))
+            }
+        }
+    }
+
+    fn load_markdown(path: &PathBuf) -> LoadResult {
+        match text::read_as_text(path) {
+            Ok(content) => LoadResult::Markdown(content),
+            Err(e) => LoadResult::Error(format!("File read failed: {e}")),
+        }
+    }
+
+    fn load_text(path: &PathBuf, code_theme: &syntastica::theme::ResolvedTheme) -> LoadResult {
+        let content = match text::read_as_text(path) {
+            Ok(c) => c,
+            Err(e) => return LoadResult::Error(format!("File read failed: {e}")),
+        };
+
+        match highlight::detect_language(path) {
+            Some(lang) => match highlight::highlight_source(&content, lang, code_theme) {
+                Ok(lines) => LoadResult::CodeText { content, lines },
+                Err(_) => LoadResult::PlainText(content),
+            },
+            None => LoadResult::PlainText(content),
+        }
+    }
+
+    fn apply_load_result(&mut self, ctx: &egui::Context, result: LoadResult) -> PreviewState {
+        match result {
+            LoadResult::Error(msg) => PreviewState::Error(msg),
+            LoadResult::Image(decoded) => Self::decoded_image_to_preview_state(ctx, decoded),
+            LoadResult::Pdf(path, pages) => {
+                self.pdf_provider.record_external_render(&path, pages);
+                match self.pdf_provider.get_or_render_first_pages(&path) {
+                    Ok(pages) => Self::pdf_pages_to_preview_state(ctx, pages),
+                    Err(e) => PreviewState::Error(format!("PDF render failed: {e}")),
+                }
+            }
+            LoadResult::PlainText(content) => PreviewState::PlainText { content },
+            LoadResult::CodeText { lines, .. } => {
+                let job = highlight::build_layout_job(&lines, egui::FontId::monospace(14.0));
+                PreviewState::CodeText { job }
+            }
+            LoadResult::Markdown(content) => PreviewState::Markdown { content },
+        }
+    }
+
+    fn pdf_pages_to_preview_state(ctx: &egui::Context, pages: &[DecodedPage]) -> PreviewState {
+        let page_textures = pages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| load_rgba_texture(ctx, format!("pdf_page_{i}"), p.width, p.height, &p.rgba8))
+            .collect();
+        PreviewState::Pdf {
+            page_textures,
+            current_page: 0,
         }
     }
 
@@ -229,53 +359,6 @@ impl RooqApp {
             }
         }
     }
-
-    fn load_pdf(&mut self, ctx: &egui::Context, path: &PathBuf) -> PreviewState {
-        match self.pdf_provider.get_or_render_first_pages(path) {
-            Ok(pages) => {
-                let page_textures = pages
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| {
-                        load_rgba_texture(ctx, format!("pdf_page_{i}"), p.width, p.height, &p.rgba8)
-                    })
-                    .collect();
-                PreviewState::Pdf {
-                    page_textures,
-                    current_page: 0,
-                }
-            }
-            Err(e) => PreviewState::Error(format!("PDF render failed: {e}")),
-        }
-    }
-
-    fn load_markdown(&mut self, path: &PathBuf) -> PreviewState {
-        match text::read_as_text(path) {
-            Ok(content) => PreviewState::Markdown { content },
-            Err(e) => PreviewState::Error(format!("File read failed: {e}")),
-        }
-    }
-
-    fn load_text(&mut self, path: &PathBuf) -> PreviewState {
-        let content = match text::read_as_text(path) {
-            Ok(c) => c,
-            Err(e) => return PreviewState::Error(format!("File read failed: {e}")),
-        };
-
-        match highlight::detect_language(path) {
-            Some(lang) => match highlight::highlight_source(&content, lang, &self.code_theme) {
-                Ok(lines) => {
-                    let job = highlight::build_layout_job(
-                        &lines,
-                        egui::FontId::monospace(14.0),
-                    );
-                    PreviewState::CodeText { job }
-                }
-                Err(_) => PreviewState::PlainText { content },
-            },
-            None => PreviewState::PlainText { content },
-        }
-    }
 }
 
 impl eframe::App for RooqApp {
@@ -286,6 +369,8 @@ impl eframe::App for RooqApp {
                 return;
             }
         }
+
+        self.poll_pending(ctx);
 
         if let PreviewState::Image {
             anim: Some(anim), ..
@@ -304,7 +389,7 @@ impl eframe::App for RooqApp {
             self.draw_preview(ui);
         });
 
-        if self.close_requested.is_some() {
+        if self.close_requested.is_some() || self.pending.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
@@ -326,6 +411,11 @@ impl RooqApp {
             PreviewState::Empty => {
                 ui.centered_and_justified(|ui| {
                     ui.label("Drop or open a file to preview");
+                });
+            }
+            PreviewState::Loading => {
+                ui.centered_and_justified(|ui| {
+                    ui.spinner();
                 });
             }
             PreviewState::Error(msg) => {
